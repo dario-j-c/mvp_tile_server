@@ -6,16 +6,16 @@ and includes CORS support and basic caching for static assets (like tiles).
 """
 
 import argparse
+import email.utils  # For formatting HTTP dates
 import io
 import mimetypes
 import os
 import socket
 import sys
+from datetime import datetime, timedelta
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import quote, unquote
-from datetime import datetime, timedelta
-import email.utils  # For formatting HTTP dates
 
 # List of file extensions to exclude from directory listings
 # Add or remove extensions as needed (include the dot)
@@ -31,6 +31,7 @@ EXCLUDED_DIRECTORIES = [
     ".venv",  # Python virtual environment
     "venv",  # Another common Python virtual environment name
     "node_modules",  # JavaScript dependencies
+    "data",  # Arbitrary files
 ]
 
 
@@ -68,7 +69,7 @@ class RestrictedCORSAndCacheFileHandler(SimpleHTTPRequestHandler):
         mimetypes.add_type("application/x-protobuf", ".pbf")
         mimetypes.add_type("application/vnd.mapbox-vector-tile", ".mvt")
 
-        # Other common types (explicitly adding them ensures consistency)
+        # Other common types (explicitly adding them to ensure consistency)
         mimetypes.add_type("application/json", ".json")
         mimetypes.add_type("text/css", ".css")
         mimetypes.add_type("text/javascript", ".js")
