@@ -6,7 +6,7 @@ In the future, another methodology may be used (for example serving MBTiles, Clo
 
 # Usage
 
-To setup the simple servet to serve the files, the following mus tbe run:
+To setup the simple servet to serve the files, the following must be run:
 
 ```bash
 python3 main.py [path to tiles] -p [port to use] -b [address to bind]
