@@ -103,8 +103,7 @@ class RestrictedCORSAndCacheFileHandler(SimpleHTTPRequestHandler):
             self.log_message(
                 f"Attempted path traversal detected: {path} -> {full_path}"
             )
-            # Instead of redirecting to self.directory, which can mask the original
-            # malicious intent, we'll mark this as an invalid path.
+            # Mark this as an invalid path.
             # do_GET will handle it by sending a 403 Forbidden.
             return None  # Indicate an invalid path
 
@@ -120,12 +119,15 @@ class RestrictedCORSAndCacheFileHandler(SimpleHTTPRequestHandler):
             return
 
         # Let the base SimpleHTTPRequestHandler handle the actual file serving
+        #
         # We've already set self.directory in __init__ for SimpleHTTPRequestHandler
         # to use, but translate_path directly gives us the target path.
+        #
         # We need to set the base directory for the parent class's do_GET to work
         # correctly. This is usually done by passing `directory` to `super().__init__`.
         # Since `SimpleHTTPRequestHandler`'s `do_GET` calls `translate_path` internally,
         # we need to ensure our `translate_path` returns something it can use.
+        #
         # The simplest way is to let the parent's `do_GET` call our `translate_path`.
         # So, no need to re-call translate_path here, just let the parent do its job
         # and our override will be used.
@@ -138,8 +140,10 @@ class RestrictedCORSAndCacheFileHandler(SimpleHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Origin", "*")
 
         # Basic caching for static files (like tiles)
+        #
         # For production, consider more sophisticated caching based on file hashes (ETag)
         # or more granular cache policies. For simple serving, this is good.
+        #
         # Cache for 1 year (31536000 seconds) for highly static tiles
         cache_duration_seconds = 31536000  # 1 year
         self.send_header(
@@ -192,13 +196,13 @@ class RestrictedCORSAndCacheFileHandler(SimpleHTTPRequestHandler):
         # Sort the filtered list
         filtered_list.sort(key=lambda a: a.lower())
 
-        # --- HTML generation for directory listing (mostly unchanged, good as is) ---
+        # --- HTML generation for directory listing ---
         r = []
         r.append("<!DOCTYPE HTML>")
         r.append("<html>\n<head>")
         r.append(
             "<title>Directory listing for {}</title>".format(
-                os.path.basename(path) or "/"  # Cleaner title for root
+                os.path.basename(path) or "/"
             )
         )
         r.append('<meta name="viewport" content="width=device-width, initial-scale=1">')
