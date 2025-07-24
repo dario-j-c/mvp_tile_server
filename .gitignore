@@ -1,5 +1,6 @@
 tiles/
 data/
+!data/.gitkeep
 venv/
 .venv/
 .DS_Store
