@@ -3,3 +3,5 @@ data/
 venv/
 .venv/
 .DS_Store
+
+tiletest.html
