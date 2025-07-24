@@ -46,13 +46,24 @@ class RestrictedCORSAndCacheFileHandler(SimpleHTTPRequestHandler):
     """
 
     def __init__(self, *args, **kwargs):
-        # The 'directory' is passed via partial in run_server
+        # The 'directory' is passed via partial in run_server.
+        # We pop it from kwargs to ensure it's handled explicitly and not passed twice
+        # to the super().__init__ call.
         self.directory = kwargs.pop("directory")
-        # Ensure the base directory is an absolute path for security
+        # Ensure the base directory is an absolute path for security and consistency.
         self.directory = os.path.abspath(self.directory)
 
-        self.add_extra_mimetypes()  # Register custom MIME types
-        super().__init__(*args, **kwargs)
+        # Register custom MIME types before the super().__init__ call to ensure they are available
+        # when SimpleHTTPRequestHandler tries to guess types.
+        self.add_extra_mimetypes()
+
+        # Call the parent class's __init__ method, passing the required arguments.
+        # We explicitly pass our 'directory' as the directory for the parent handler to use.
+        super().__init__(
+            *args,
+            directory=str(self.directory),  # Ensure directory is passed as a string
+            **kwargs,
+        )
 
     def add_extra_mimetypes(self):
         """Adds custom or commonly needed MIME types for serving, especially for map tiles."""
@@ -86,6 +97,7 @@ class RestrictedCORSAndCacheFileHandler(SimpleHTTPRequestHandler):
         Translate URL path to filesystem path, ensuring we stay strictly within
         the specified base directory (`self.directory`).
         This method is critical for preventing directory traversal attacks.
+        It also correctly decodes URL-encoded characters.
         """
         # Remove query parameters and anchors
         path = path.split("?", 1)[0]
@@ -97,45 +109,98 @@ class RestrictedCORSAndCacheFileHandler(SimpleHTTPRequestHandler):
         # Construct the full filesystem path
         full_path = os.path.normpath(os.path.join(self.directory, path))
 
-        # Security check: Ensure the resolved path is indeed inside the base directory
-        # This prevents '..' traversal attempts.
+        # Security check: Ensure the resolved path is indeed inside the base directory.
+        # This prevents '..' (directory traversal) attempts.
         if not full_path.startswith(self.directory):
             self.log_message(
                 f"Attempted path traversal detected: {path} -> {full_path}"
             )
-            # Mark this as an invalid path.
-            # do_GET will handle it by sending a 403 Forbidden.
             return None  # Indicate an invalid path
 
         return full_path
 
     def do_GET(self):
-        """Handle GET requests, with security and caching."""
-        # Translate the path *before* any other processing to ensure security
-        path = self.translate_path(self.path)
+        """
+        Handles GET requests.
+        Custom logic to prioritize directory listings over automatic index.html serving
+        when a directory is requested. Otherwise, delegates to the parent class for file serving.
+        """
+        # Translate the requested URL path to a local filesystem path.
+        path_on_disk = self.translate_path(self.path)
 
-        if path is None:  # Path traversal detected or invalid path
+        # If translation failed (e.g., path traversal detected), send 403 Forbidden.
+        if path_on_disk is None:
             self.send_error(403, "Forbidden: Directory traversal attempt blocked.")
             return
 
-        # Let the base SimpleHTTPRequestHandler handle the actual file serving
-        #
-        # We've already set self.directory in __init__ for SimpleHTTPRequestHandler
-        # to use, but translate_path directly gives us the target path.
-        #
-        # We need to set the base directory for the parent class's do_GET to work
-        # correctly. This is usually done by passing `directory` to `super().__init__`.
-        # Since `SimpleHTTPRequestHandler`'s `do_GET` calls `translate_path` internally,
-        # we need to ensure our `translate_path` returns something it can use.
-        #
-        # The simplest way is to let the parent's `do_GET` call our `translate_path`.
-        # So, no need to re-call translate_path here, just let the parent do its job
-        # and our override will be used.
+        # If the resolved path points to a directory on disk:
+        if os.path.isdir(path_on_disk):
+            # If the URL for a directory does not end with a slash (e.g., "/my_dir" instead of "/my_dir/"),
+            # send a 301 redirect to add the trailing slash. This is standard HTTP practice.
+            if not self.path.endswith("/"):
+                self.send_response(301)
+                self.send_header("Location", self.path + "/")
+                self.end_headers()
+                return
+
+            # If it's a directory request with a trailing slash, generate and serve the directory listing.
+            file_to_serve = self.list_directory(path_on_disk)
+            if file_to_serve:
+                try:
+                    self.copyfile(file_to_serve, self.wfile)
+                finally:
+                    file_to_serve.close()
+            return  # Request handled
+
+        # If it's not a directory (meaning it's a file request),
+        # delegate to the parent SimpleHTTPRequestHandler's do_GET method.
+        # Our overridden translate_path will ensure it operates within the specified directory.
         super().do_GET()
+
+    def do_HEAD(self):
+        """
+        Handles HEAD requests.
+        Similar to do_GET, prioritizes directory listing headers over automatic index.html.
+        """
+        # Translate the requested URL path to a local filesystem path.
+        path_on_disk = self.translate_path(self.path)
+
+        # If translation failed (e.g., path traversal detected), send 403 Forbidden.
+        if path_on_disk is None:
+            self.send_error(403, "Forbidden: Directory traversal attempt blocked.")
+            return
+
+        # If the resolved path points to a directory on disk:
+        if os.path.isdir(path_on_disk):
+            # If the URL for a directory does not end with a slash, redirect.
+            if not self.path.endswith("/"):
+                self.send_response(301)
+                self.send_header("Location", self.path + "/")
+                self.end_headers()
+                return
+
+            # For a directory HEAD request with a trailing slash, send 200 OK
+            # and content type for HTML, but no body (as it's HEAD).
+            self.send_response(200)
+            self.send_header("Content-type", "text/html; charset=utf-8")
+            self.end_headers()
+            return  # Request handled
+
+        # If it's not a directory (meaning it's a file request),
+        # delegate to the parent SimpleHTTPRequestHandler's do_HEAD method.
+        # Our overridden translate_path will ensure it operates within the specified directory.
+        super().do_HEAD()
+
+    # Removed the `send_head` override. The logic from it is now properly
+    # handled by `do_GET` and `do_HEAD` which delegate to `super().do_GET()`
+    # and `super().do_HEAD()` for file serving.
+    # The `translate_path` override ensures the security, and `end_headers`
+    # adds CORS and caching.
 
     def end_headers(self):
         """
         Overrides to add CORS and Cache-Control headers before sending.
+        These headers are added for all responses (files, directory listings, errors).
         """
         self.send_header("Access-Control-Allow-Origin", "*")
 
@@ -156,7 +221,8 @@ class RestrictedCORSAndCacheFileHandler(SimpleHTTPRequestHandler):
             "Expires", email.utils.formatdate(expires_time.timestamp(), usegmt=True)
         )
 
-        super().end_headers()  # Call the parent class's end_headers to send the standard headers
+        # Call the parent class's end_headers to send the standard headers (like Server, Date).
+        super().end_headers()
 
     def list_directory(self, path):
         """
@@ -193,7 +259,7 @@ class RestrictedCORSAndCacheFileHandler(SimpleHTTPRequestHandler):
 
             filtered_list.append(name)
 
-        # Sort the filtered list
+        # Sort the filtered list for consistent display
         filtered_list.sort(key=lambda a: a.lower())
 
         # --- HTML generation for directory listing ---
@@ -256,7 +322,7 @@ class RestrictedCORSAndCacheFileHandler(SimpleHTTPRequestHandler):
             rel_path = os.path.relpath(full_path_item, self.directory)
             url_path = "/" + quote(rel_path.replace(os.path.sep, "/"))
 
-            # Add trailing slash for directories
+            # Add trailing slash for directories in the displayed name and URL
             if os.path.isdir(full_path_item):
                 url_path += "/"
                 name += "/"  # Append slash to displayed name
@@ -269,7 +335,7 @@ class RestrictedCORSAndCacheFileHandler(SimpleHTTPRequestHandler):
         encoded = "\n".join(r).encode("utf-8")
         f = io.BytesIO(encoded)
 
-        # Send response headers (Note: end_headers will add CORS/Cache)
+        # Send response headers for the directory listing
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
