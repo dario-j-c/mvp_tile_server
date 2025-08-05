@@ -65,7 +65,7 @@ def _scan_tiles(
                         if tile_file.is_file():
                             tile_count += 1
                             if len(sample_tiles) < max_samples:
-                                sample_tiles.append(f"/{z}/{x}/{tile_file.name}")
+                                sample_tiles.append(f"/tiles/{z}/{x}/{tile_file.name}")
 
     if zoom_levels_found:
         min_zoom = min(zoom_levels_found)
