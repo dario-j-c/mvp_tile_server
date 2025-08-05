@@ -241,7 +241,7 @@ def create_app(tiles_dir: str, do_scan: bool = True) -> FastAPI:
 
     # Use :path converter for y to allow names like 123.png without extra routing.
     # NOTE: may add tiles to path to match old style; it's not important so not implemented
-    @app.get("/{z}/{x}/{y:path}", summary="Serve a single map tile")
+    @app.get("/tiles/{z}/{x}/{y:path}", summary="Serve a single map tile")
     async def get_tile(z: int, x: int, y: str, request: Request):
         """
         Serves an individual tile file (e.g., .png, .jpg) based on Z/X/Y coordinates.
