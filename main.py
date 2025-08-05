@@ -10,7 +10,7 @@ Usage:
     python3 main.py [path to tiles] -p [port] -b [bind address]
 
     Or run directly with uvicorn (for production events):
-    uvicorn main:get_app --factory --host 127.0.0.1 --port 8000 --workers 4
+    uvicorn main:get_app --factory --host 0.0.0.0 --port 8000 --workers 4
 """
 
 import argparse
@@ -157,7 +157,7 @@ def create_app(tiles_dir: str, do_scan: bool = True) -> FastAPI:
                 )
                 if zoom_levels_sorted:
                     logger.info(
-                        "Found %,d tiles across zoom levels %d-%d",
+                        "Found %d tiles across zoom levels %d-%d",
                         tile_count,
                         min_zoom,
                         max_zoom,
@@ -338,8 +338,8 @@ def parse_arguments():
     parser.add_argument(
         "-b",
         "--bind",
-        default="127.0.0.1",
-        help="Address to bind to (default: 127.0.0.1 for local events).",
+        default="0.0.0.0",
+        help="Address to bind to (default: 0.0.0.0 for local events).",
     )
     parser.add_argument(
         "--workers",
