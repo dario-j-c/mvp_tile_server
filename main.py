@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
 Event-optimized high-performance tile server using FastAPI and Uvicorn.
-Serves static tile files from a directory structure following {z}/{x}/{y.ext}.
+Serves static tile files from multiple configured tile directories.
+
+Supports multiple tilesets configured via JSON file, following {tileset_name}/{z}/{x}/{y.ext}.
 
 Optimized for local event deployment with looping displays and interactive maps.
 Should handle zoom levels 1-25 with efficient multi-worker tile serving.
 
 Usage:
-    python3 main.py [path to tiles] -p [port] -b [bind address]
+    python3 main.py [config_file] -p [port] -b [bind address]
 
     Or run directly with uvicorn (for production events):
     uvicorn main:get_app --factory --host 0.0.0.0 --port 8000 --workers 4
@@ -15,12 +17,14 @@ Usage:
 
 import argparse
 import email.utils
+import json
 import logging
 import os
+import re
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
@@ -32,6 +36,9 @@ SUPPORTED_EXTS: Tuple[str, ...] = (".png", ".jpg", ".jpeg", ".webp")
 DEFAULT_MIN_Z = 1
 DEFAULT_MAX_Z = 25
 
+# Valid tileset name pattern: alphanumeric, hyphens, underscores, must not start with digit
+VALID_TILESET_NAME = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_-]*$")
+
 # ---- Logging ----
 logger = logging.getLogger("event_tile_server")
 _handler = logging.StreamHandler(sys.stdout)
@@ -39,6 +46,104 @@ _formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 _handler.setFormatter(_formatter)
 logger.addHandler(_handler)
 logger.setLevel(logging.INFO)
+
+
+def _load_tileset_config(config_path: str) -> Dict[str, str]:
+    """
+    Load and validate tileset configuration from JSON file.
+
+    Expected format:
+    {
+        "tilesets": {
+            "osm": "/path/to/osm/tiles",
+            "satellite": "/path/to/satellite/tiles"
+        }
+    }
+
+    Returns:
+        Dictionary mapping valid tileset names to resolved directory paths
+
+    Raises:
+        ValueError: If config is invalid or paths don't exist (with comprehensive error list)
+    """
+    config_file = Path(config_path)
+    if not config_file.exists():
+        raise ValueError(f"Config file not found: {config_path}")
+
+    try:
+        with open(config_file, "r") as f:
+            config_data = json.load(f)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON in config file: {e}")
+    except Exception as e:
+        raise ValueError(f"Error reading config file: {e}")
+
+    if "tilesets" not in config_data:
+        raise ValueError("Config file must contain 'tilesets' key")
+
+    tilesets = config_data["tilesets"]
+    if not isinstance(tilesets, dict):
+        raise ValueError("'tilesets' must be a dictionary")
+
+    if not tilesets:
+        raise ValueError("At least one tileset must be configured")
+
+    # Collect ALL errors instead of failing on first one
+    errors = []
+    validated_tilesets = {}
+
+    for name, path in tilesets.items():
+        # Validate tileset name
+        if not isinstance(name, str) or not VALID_TILESET_NAME.match(name):
+            errors.append(
+                f"• Invalid tileset name '{name}': Must be alphanumeric + hyphens/underscores, and cannot start with a digit"
+            )
+            continue  # Skip path validation if name is invalid
+
+        # Validate path type
+        if not isinstance(path, str):
+            errors.append(
+                f"• Tileset '{name}': Path must be a string, got {type(path).__name__}"
+            )
+            continue
+
+        # Validate and resolve path
+        try:
+            resolved_path = Path(path).resolve()
+        except Exception as e:
+            errors.append(f"• Tileset '{name}': Error resolving path '{path}': {e}")
+            continue
+
+        # Check path exists
+        if not resolved_path.exists():
+            errors.append(f"• Tileset '{name}': Path does not exist: {resolved_path}")
+            continue
+
+        # Check path is directory
+        if not resolved_path.is_dir():
+            errors.append(
+                f"• Tileset '{name}': Path is not a directory: {resolved_path}"
+            )
+            continue
+
+        # If we get here, this tileset is valid
+        validated_tilesets[name] = str(resolved_path)
+
+    # If there were any errors, raise them all at once
+    if errors:
+        error_count = len(errors)
+        error_summary = f"Found {error_count} configuration error{'s' if error_count > 1 else ''}:\n\n"
+        detailed_errors = "\n".join(errors)
+
+        if validated_tilesets:
+            valid_count = len(validated_tilesets)
+            footer = f"\n\n✓ {valid_count} tileset{'s' if valid_count > 1 else ''} validated successfully: {', '.join(validated_tilesets.keys())}"
+        else:
+            footer = "\n\n✗ No valid tilesets found"
+
+        raise ValueError(error_summary + detailed_errors + footer)
+
+    return validated_tilesets
 
 
 def _scan_tiles(
@@ -64,8 +169,10 @@ def _scan_tiles(
                     for tile_file in x_dir.iterdir():
                         if tile_file.is_file():
                             tile_count += 1
+                            # NOTE: Sample tiles now include tileset name in path
                             if len(sample_tiles) < max_samples:
-                                sample_tiles.append(f"/tiles/{z}/{x}/{tile_file.name}")
+                                # We'll need tileset name from caller context
+                                sample_tiles.append(f"{z}/{x}/{tile_file.name}")
 
     if zoom_levels_found:
         min_zoom = min(zoom_levels_found)
@@ -77,6 +184,66 @@ def _scan_tiles(
         zoom_levels_sorted = []
 
     return tile_count, sample_tiles, zoom_levels_sorted, min_zoom, max_zoom
+
+
+def _scan_all_tilesets(tilesets: Dict[str, str]) -> Dict[str, Dict]:
+    """
+    Scan all configured tilesets for metadata.
+
+    Returns:
+        Dictionary with tileset metadata for each configured tileset
+    """
+    all_metadata = {}
+
+    for tileset_name, tileset_path in tilesets.items():
+        logger.info("Scanning tileset '%s' at %s", tileset_name, tileset_path)
+        try:
+            tile_count, sample_tiles, zoom_levels, min_zoom, max_zoom = _scan_tiles(
+                Path(tileset_path)
+            )
+
+            # Add tileset name to sample tile paths
+            sample_tiles_with_tileset = [
+                f"/{tileset_name}/{tile}" for tile in sample_tiles
+            ]
+
+            all_metadata[tileset_name] = {
+                "path": tileset_path,
+                "tile_count": tile_count,
+                "sample_tiles": sample_tiles_with_tileset,
+                "zoom_levels": zoom_levels,
+                "min_zoom": min_zoom,
+                "max_zoom": max_zoom,
+            }
+
+            if zoom_levels:
+                logger.info(
+                    "Tileset '%s': %d tiles, zoom levels %d-%d",
+                    tileset_name,
+                    tile_count,
+                    min_zoom,
+                    max_zoom,
+                )
+            else:
+                logger.info(
+                    "Tileset '%s': %d tiles, no zoom structure detected",
+                    tileset_name,
+                    tile_count,
+                )
+
+        except Exception as e:
+            logger.error("Error scanning tileset '%s': %s", tileset_name, e)
+            all_metadata[tileset_name] = {
+                "path": tileset_path,
+                "tile_count": 0,
+                "sample_tiles": [],
+                "zoom_levels": [],
+                "min_zoom": DEFAULT_MIN_Z,
+                "max_zoom": DEFAULT_MAX_Z,
+                "error": str(e),
+            }
+
+    return all_metadata
 
 
 def _find_tile_path(base_dir: Path, z: int, x: int, y_name: str) -> Optional[Path]:
@@ -116,68 +283,46 @@ def _media_type_for_suffix(suffix: str) -> Optional[str]:
     return None
 
 
-def create_app(tiles_dir: str, do_scan: bool = True) -> FastAPI:
+def create_app(config_path: str, do_scan: bool = True) -> FastAPI:
     """
     Create and configure the FastAPI application for serving map tiles.
 
     Args:
-        tiles_dir: The root directory where tile files are stored in a {z}/{x}/{y} structure.
-        do_scan: If True, scan the directory on startup for metadata.
+        config_path: Path to JSON configuration file containing tileset definitions
+        do_scan: If True, scan directories on startup for metadata.
     """
-    try:
-        res_tiles_dir = Path(tiles_dir).resolve()
-    except Exception as e:
-        logger.error("Error resolving tiles directory '%s': %s", tiles_dir, e)
-        logger.warning("Falling back to current directory for tile serving.")
-        res_tiles_dir = Path(".").resolve()
 
-    if not res_tiles_dir.is_dir():
-        logger.warning(
-            "Tiles directory not found at '%s'. Server will start but may not serve tiles correctly.",
-            res_tiles_dir,
-        )
+    # Load and validate tileset configuration
+    try:
+        tilesets = _load_tileset_config(config_path)
+        logger.info("Loaded %d tilesets from config", len(tilesets))
+    except ValueError as e:
+        logger.error("Configuration error: %s", e)
+        raise
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # Startup
-        logger.info("Event tile server starting - serving from %s", res_tiles_dir)
-        tile_count = 0
-        sample_tiles: List[str] = []
-        zoom_levels_sorted: List[int] = []
-        min_zoom = DEFAULT_MIN_Z
-        max_zoom = DEFAULT_MAX_Z
+        logger.info("Event tile server starting with %d tilesets", len(tilesets))
 
+        tileset_metadata = {}
         if do_scan:
-            logger.info(
-                "Pre-calculating tile count and zoom range for event displays (this may take a moment)..."
-            )
-            try:
-                tile_count, sample_tiles, zoom_levels_sorted, min_zoom, max_zoom = (
-                    _scan_tiles(res_tiles_dir)
-                )
-                if zoom_levels_sorted:
-                    logger.info(
-                        "Found %d tiles across zoom levels %d-%d",
-                        tile_count,
-                        min_zoom,
-                        max_zoom,
-                    )
-                else:
-                    logger.info(
-                        "No tiles detected during scan. Using default zoom range %d-%d",
-                        DEFAULT_MIN_Z,
-                        DEFAULT_MAX_Z,
-                    )
-            except Exception as e:
-                logger.exception("Error scanning tiles directory: %s", e)
-                # Fallback defaults are already set
+            logger.info("Pre-calculating tile metadata for all tilesets...")
+            tileset_metadata = _scan_all_tilesets(tilesets)
+        else:
+            # Create minimal metadata without scanning
+            for name, path in tilesets.items():
+                tileset_metadata[name] = {
+                    "path": path,
+                    "tile_count": 0,
+                    "sample_tiles": [],
+                    "zoom_levels": [],
+                    "min_zoom": DEFAULT_MIN_Z,
+                    "max_zoom": DEFAULT_MAX_Z,
+                }
 
-        app.state.tile_count = tile_count
-        app.state.sample_tiles = sample_tiles
-        app.state.tiles_dir = res_tiles_dir
-        app.state.zoom_levels = zoom_levels_sorted
-        app.state.min_zoom = min_zoom
-        app.state.max_zoom = max_zoom
+        app.state.tilesets = tilesets
+        app.state.tileset_metadata = tileset_metadata
 
         logger.info("Event tile server ready for displays!")
         try:
@@ -187,9 +332,9 @@ def create_app(tiles_dir: str, do_scan: bool = True) -> FastAPI:
             logger.info("Event tile server shutting down...")
 
     app = FastAPI(
-        title="Event Tile Server",
-        description="High-performance tile server optimized for local events with looping displays",
-        version="2.2.0-event",
+        title="Multi-Tileset Event Tile Server",
+        description="High-performance tile server with multiple tileset support, optimized for local events",
+        version="2.3.0-event",
         lifespan=lifespan,
     )
 
@@ -213,24 +358,38 @@ def create_app(tiles_dir: str, do_scan: bool = True) -> FastAPI:
     async def health_check():
         return {
             "status": "healthy",
-            "service": "event-tile-server",
+            "service": "multi-tileset-event-tile-server",
             "environment": "local-event",
         }
 
     @app.get("/", summary="Server information and status")
     async def root(request: Request):
+        tilesets_info = {}
+        total_tiles = 0
+
+        for name, metadata in request.app.state.tileset_metadata.items():
+            tilesets_info[name] = {
+                "path": metadata["path"],
+                "tile_count": metadata["tile_count"],
+                "zoom_levels": metadata["zoom_levels"],
+                "sample_tiles": metadata["sample_tiles"][
+                    :3
+                ],  # Limit samples in summary
+            }
+            total_tiles += metadata["tile_count"]
+
         return {
-            "service": "Event Tile Server",
-            "version": "2.2.0-event",
+            "service": "Multi-Tileset Event Tile Server",
+            "version": "2.3.0-event",
             "environment": "local-event",
-            "tiles_dir": str(request.app.state.tiles_dir),
-            "total_tiles": f"{request.app.state.tile_count:,}",
-            "zoom_levels": request.app.state.zoom_levels,
-            "sample_tile_urls": request.app.state.sample_tiles,
+            "tilesets": tilesets_info,
+            "total_tiles": f"{total_tiles:,}",
             "health_check_url": "/health",
-            "tile_url_format": "/{z}/{x}/{y.ext}",
+            "tileset_detail_url": "/tilesets/{tileset_name}",
+            "tile_url_format": "/{tileset_name}/{z}/{x}/{y.ext}",
             "optimizations": [
                 "Multi-worker tile serving via Uvicorn",
+                "Multiple tileset support with independent caching",
                 "Aggressive client-side caching for looping displays (Cache-Control: immutable)",
                 "Local network optimization",
                 "Event stability features (e.g., connection limits, keep-alive)",
@@ -239,24 +398,60 @@ def create_app(tiles_dir: str, do_scan: bool = True) -> FastAPI:
             "note": "Optimized for local event deployment with typical zoom levels 1-25.",
         }
 
-    # Use :path converter for y to allow names like 123.png without extra routing.
-    # NOTE: may add tiles to path to match old style; it's not important so not implemented
-    @app.get("/tiles/{z}/{x}/{y:path}", summary="Serve a single map tile")
-    async def get_tile(z: int, x: int, y: str, request: Request):
+    @app.get(
+        "/tilesets/{tileset_name}",
+        summary="Get detailed information about a specific tileset",
+    )
+    async def get_tileset_info(tileset_name: str, request: Request):
+        """Get detailed metadata for a specific tileset."""
+        if tileset_name not in request.app.state.tileset_metadata:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Tileset '{tileset_name}' not found. Available tilesets: {list(request.app.state.tilesets.keys())}",
+            )
+
+        metadata = request.app.state.tileset_metadata[tileset_name]
+        return {
+            "name": tileset_name,
+            "path": metadata["path"],
+            "tile_count": f"{metadata['tile_count']:,}",
+            "zoom_levels": metadata["zoom_levels"],
+            "zoom_range": f"{metadata['min_zoom']}-{metadata['max_zoom']}"
+            if metadata["zoom_levels"]
+            else "unknown",
+            "sample_tiles": metadata["sample_tiles"],
+            "tile_url_format": f"/{tileset_name}/{{z}}/{{x}}/{{y.ext}}",
+        }
+
+    @app.get(
+        "/{tileset_name}/{z}/{x}/{y:path}",
+        summary="Serve a single map tile from specified tileset",
+    )
+    async def get_tile(tileset_name: str, z: int, x: int, y: str, request: Request):
         """
-        Serves an individual tile file (e.g., .png, .jpg) based on Z/X/Y coordinates.
+        Serves an individual tile file (e.g., .png, .jpg) from a specific tileset based on Z/X/Y coordinates.
 
         Validation:
+          - tileset_name must be a configured tileset
           - z must be within [min_zoom, max_zoom] discovered or defaults.
           - x must be within [0, 2^z - 1].
           - y filename is sanitized and, if numeric stem, y index validated within [0, 2^z - 1].
         """
-        min_allowed_z = request.app.state.min_zoom
-        max_allowed_z = request.app.state.max_zoom
+        # Validate tileset exists
+        if tileset_name not in request.app.state.tilesets:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Tileset '{tileset_name}' not found. Available tilesets: {list(request.app.state.tilesets.keys())}",
+            )
+
+        metadata = request.app.state.tileset_metadata[tileset_name]
+        min_allowed_z = metadata["min_zoom"]
+        max_allowed_z = metadata["max_zoom"]
+
         if not (min_allowed_z <= z <= max_allowed_z):
             raise HTTPException(
                 status_code=404,
-                detail=f"Invalid zoom level: {z}. Must be between {min_allowed_z} and {max_allowed_z}.",
+                detail=f"Invalid zoom level: {z}. Must be between {min_allowed_z} and {max_allowed_z} for tileset '{tileset_name}'.",
             )
 
         if not (0 <= x < (1 << z)):
@@ -282,11 +477,12 @@ def create_app(tiles_dir: str, do_scan: bool = True) -> FastAPI:
                     detail=f"Invalid Y coordinate {y_int} for zoom {z}.",
                 )
 
-        base_dir: Path = request.app.state.tiles_dir
+        base_dir = Path(request.app.state.tilesets[tileset_name])
         tile_path = _find_tile_path(base_dir, z, x, y_name)
         if not tile_path:
             raise HTTPException(
-                status_code=404, detail=f"Tile not found: /{z}/{x}/{y_name}"
+                status_code=404,
+                detail=f"Tile not found: /{tileset_name}/{z}/{x}/{y_name}",
             )
 
         # Headers: Cache, ETag (weak), Last-Modified
@@ -297,6 +493,7 @@ def create_app(tiles_dir: str, do_scan: bool = True) -> FastAPI:
             "Last-Modified": email.utils.formatdate(st.st_mtime, usegmt=True),
             "X-Tile-Server": "event-optimized",
             "X-Cache-Strategy": "local-event",
+            "X-Tileset": tileset_name,
         }
 
         media_type = _media_type_for_suffix(tile_path.suffix)
@@ -309,24 +506,24 @@ def get_app() -> FastAPI:
     """
     Uvicorn factory entry point.
 
-    Respects TILES_PATH and TILE_SCAN env vars:
-      - TILES_PATH: path to tiles directory (default '.')
+    Respects CONFIG_PATH and TILE_SCAN env vars:
+      - CONFIG_PATH: path to tileset config file (default 'tilesets.json')
       - TILE_SCAN: '1' to enable startup scan (default '1'), '0' to disable
     """
-    tiles_dir = os.getenv("TILES_PATH", ".")
+    config_path = os.getenv("CONFIG_PATH", "tilesets.json")
     do_scan = os.getenv("TILE_SCAN", "1") != "0"
-    return create_app(tiles_dir, do_scan=do_scan)
+    return create_app(config_path, do_scan=do_scan)
 
 
 def parse_arguments():
     parser = argparse.ArgumentParser(
-        description="Event-optimized tile server using FastAPI/Uvicorn."
+        description="Event-optimized multi-tileset tile server using FastAPI/Uvicorn."
     )
     parser.add_argument(
-        "path",
+        "config",
         nargs="?",
-        default=".",
-        help="Path to tiles directory (default: current directory).",
+        default="tilesets.json",
+        help="Path to tileset configuration JSON file (default: tilesets.json).",
     )
     parser.add_argument(
         "-p",
@@ -375,17 +572,40 @@ def main():
     else:
         logger.setLevel(logging.INFO)
 
+    # Validate configuration early to avoid worker crashes
+    try:
+        logger.info("Validating configuration...")
+        tilesets = _load_tileset_config(args.config)
+        logger.info(
+            "✓ Configuration valid: %d tilesets loaded successfully", len(tilesets)
+        )
+        for name, path in tilesets.items():
+            logger.info("  - %s: %s", name, path)
+    except ValueError as e:
+        print(f"\n❌ Configuration Validation Failed:")
+        print("=" * 60)
+        print(str(e))
+        print("=" * 60)
+        print("\nPlease fix the above issues and try again.")
+        print("💡 Tip: Use absolute paths to avoid path resolution issues.")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n❌ Unexpected error loading configuration: {e}")
+        sys.exit(1)
+
     # Export env for worker factory to consume
-    os.environ["TILES_PATH"] = args.path
+    os.environ["CONFIG_PATH"] = args.config
     os.environ["TILE_SCAN"] = "0" if args.no_scan else "1"
 
     print("\n" + "=" * 50)
-    print("Starting Event Tile Server")
-    print(f"📁 Serving tiles from: {os.path.abspath(args.path)}")
+    print("Starting Multi-Tileset Event Tile Server")
+    print(f"⚙️  Loading configuration from: {os.path.abspath(args.config)}")
     print(f"🌐 Listening on: http://{args.bind}:{args.port}")
     print(f"⚡ Using {args.workers} worker processes for optimal tile serving")
     print("🔎 Startup scan: {}".format("disabled" if args.no_scan else "enabled"))
-    print("Optimized for: Zoom levels 1-25, looping displays, interactive maps")
+    print(
+        "Optimized for: Multiple tilesets, zoom levels 1-25, looping displays, interactive maps"
+    )
 
     if args.event_mode:
         print("Event production mode: Enhanced stability and minimal logging enabled.")

@@ -1,0 +1,8 @@
+{
+  "tilesets": {
+    "osm": "/path/to/osm/tiles",
+    "satellite": "/path/to/satellite/tiles",
+    "topo": "/path/to/topographic/tiles",
+    "dark-theme": "/path/to/dark/tiles"
+  }
+}
