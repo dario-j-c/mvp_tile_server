@@ -1,8 +1,35 @@
 {
+  "_comment": "Example tileset configuration for the tile server",
+  "_comment_formats": "Supports both directory and tar archive sources",
+
   "tilesets": {
+    "_comment_directory": "Simple directory path (original method)",
     "osm": "/path/to/osm/tiles",
     "satellite": "/path/to/satellite/tiles",
-    "topo": "/path/to/topographic/tiles",
-    "dark-theme": "/path/to/dark/tiles"
+
+    "_comment_tar_simple": "Tar archive with auto-detected structure",
+    "topo": "/path/to/topographic/tiles.tar",
+
+    "_comment_tar_explicit": "Tar archive with explicit base_path",
+    "dark-theme": {
+      "source": "/path/to/dark/tiles.tar.gz",
+      "base_path": "tiles"
+    },
+
+    "_comment_tar_nested": "Tar with nested structure",
+    "aerial": {
+      "source": "/path/to/aerial.tar",
+      "base_path": "data/map_tiles"
+    }
+  },
+
+  "_notes": {
+    "directory_format": "Directory must contain {z}/{x}/{y.ext} structure",
+    "tar_format": "Tar files must contain {z}/{x}/{y.ext} somewhere inside",
+    "base_path": "Use base_path to specify subdirectory within tar archive",
+    "auto_detect": "If base_path is omitted, server will auto-detect structure where possible",
+    "compression": "Supports .tar (uncompressed), .tar.gz, .tar.bz2, .tar.xz",
+    "performance": "Uncompressed .tar is 5-10x faster than compressed formats",
+    "inspection": "Use inspect_tar.py to analyze tar structure before configuration"
   }
 }
