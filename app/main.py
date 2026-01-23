@@ -18,11 +18,13 @@ Usage:
 
 import asyncio
 import email.utils
+import json
 import logging
 import os
 from contextlib import asynccontextmanager
 from io import BytesIO
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -48,13 +50,18 @@ from app.utils import find_tile_path, media_type_for_suffix
 logger = logging.getLogger("event_tile_server")
 
 
-def create_app(config_path: str, do_scan: bool = True) -> FastAPI:
+def create_app(
+    config_path: str,
+    do_scan: bool = True,
+    metadata_file: Optional[str] = None,
+) -> FastAPI:
     """
     Create and configure the FastAPI application for serving map tiles.
 
     Args:
         config_path: Path to JSON configuration file containing tileset definitions.
         do_scan: If True, scan directories on startup for metadata.
+        metadata_file: Path to pre-scanned metadata JSON file (from MAIN process).
 
     Returns:
         Configured FastAPI application instance.
@@ -69,9 +76,19 @@ def create_app(config_path: str, do_scan: bool = True) -> FastAPI:
         format=f"%(levelname)s:\t[WORKER {pid}] %(message)s",
     )
 
-    # Load and validate tileset configuration
+    # Load pre-scanned metadata if available (from MAIN process)
+    pre_scanned_metadata = None
+    if metadata_file and os.path.exists(metadata_file):
+        try:
+            with open(metadata_file, "r") as f:
+                pre_scanned_metadata = json.load(f)
+            logger.info("Loaded pre-scanned metadata from MAIN process")
+        except Exception as e:
+            logger.warning("Failed to load pre-scanned metadata: %s", e)
+
+    # Load and validate tileset configuration (suppress warnings, MAIN already showed them)
     try:
-        tilesets = load_tileset_config(config_path)
+        tilesets = load_tileset_config(config_path, show_warnings=False)
         logger.info("Loaded %d tilesets from config", len(tilesets))
     except ValueError as e:
         logger.error("Configuration error: %s", e)
@@ -101,9 +118,14 @@ def create_app(config_path: str, do_scan: bool = True) -> FastAPI:
                     )
                     # Continue with other tilesets even if one fails
 
-        # Scan for metadata
+        # Load metadata (prefer pre-scanned from MAIN, fallback to scanning or defaults)
         tileset_metadata = {}
-        if do_scan:
+        if pre_scanned_metadata:
+            tileset_metadata = pre_scanned_metadata
+            logger.info(
+                "Using pre-scanned metadata for %d tilesets", len(tileset_metadata)
+            )
+        elif do_scan:
             logger.info("Pre-calculating tile metadata for all tilesets...")
             tileset_metadata = scan_all_tilesets(tilesets)
         else:
@@ -486,10 +508,12 @@ def get_app() -> FastAPI:
     Reads configuration from environment variables:
         CONFIG_PATH: Path to tileset config file (default: 'tilesets.json').
         TILE_SCAN: '1' to enable startup scan (default), '0' to disable.
+        TILE_METADATA_FILE: Path to pre-scanned metadata (from MAIN process).
 
     Returns:
         Configured FastAPI application instance.
     """
     config_path = os.getenv("CONFIG_PATH", "tilesets.json")
     do_scan = os.getenv("TILE_SCAN", "1") != "0"
-    return create_app(config_path, do_scan=do_scan)
+    metadata_file = os.getenv("TILE_METADATA_FILE")
+    return create_app(config_path, do_scan=do_scan, metadata_file=metadata_file)

@@ -67,7 +67,9 @@ def auto_detect_base_path(tar_path: Path, max_members: int = 100) -> Optional[st
     return None
 
 
-def load_tileset_config(config_path: str) -> Dict[str, TilesetConfig]:
+def load_tileset_config(
+    config_path: str, show_warnings: bool = True
+) -> Dict[str, TilesetConfig]:
     """
     Load and validate tileset configuration from JSON file.
 
@@ -251,8 +253,8 @@ def load_tileset_config(config_path: str) -> Dict[str, TilesetConfig]:
 
         raise ValueError(error_summary + detailed_errors + footer)
 
-    # Log warnings if any
-    if warnings:
+    # Log warnings if any (can be suppressed for worker processes)
+    if warnings and show_warnings:
         logger.warning("Configuration warnings:")
         for warning in warnings:
             logger.warning(warning)

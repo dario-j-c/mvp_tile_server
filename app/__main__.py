@@ -11,13 +11,15 @@ Usage:
 """
 
 import argparse
+import json
 import logging
 import os
 import sys
+import tempfile
 
 import uvicorn
 
-from app.config import load_tileset_config
+from app.config import load_tileset_config, scan_all_tilesets
 
 logger = logging.getLogger("event_tile_server")
 
@@ -113,9 +115,23 @@ def main() -> None:
         print(f"\nUnexpected error loading configuration: {e}")
         sys.exit(1)
 
+    # Perform tile scanning in MAIN process (once, not per-worker)
+    metadata_file = None
+    if not args.no_scan:
+        logger.info("Scanning tilesets for metadata...")
+        tileset_metadata = scan_all_tilesets(tilesets)
+
+        # Write metadata to temp file for workers to read
+        fd, metadata_file = tempfile.mkstemp(suffix=".json", prefix="tile_metadata_")
+        with os.fdopen(fd, "w") as f:
+            json.dump(tileset_metadata, f)
+        logger.info("Scan complete. Metadata saved for workers.")
+
     # Export env for worker factory to consume
     os.environ["CONFIG_PATH"] = args.config
-    os.environ["TILE_SCAN"] = "0" if args.no_scan else "1"
+    os.environ["TILE_SCAN"] = "0"  # Workers never scan, MAIN already did
+    if metadata_file:
+        os.environ["TILE_METADATA_FILE"] = metadata_file
 
     print("\n" + "=" * 50)
     print("Starting Multi-Tileset Event Tile Server")
@@ -170,6 +186,13 @@ def main() -> None:
     except Exception as e:
         print(f"Server encountered a critical error: {e}", file=sys.stderr)
         sys.exit(1)
+    finally:
+        # Clean up temp metadata file
+        if metadata_file and os.path.exists(metadata_file):
+            try:
+                os.remove(metadata_file)
+            except Exception:
+                pass  # Best effort cleanup
 
 
 if __name__ == "__main__":

@@ -63,7 +63,7 @@ def build_tar_index(
                         tile_key = f"{z_str}/{x_str}/{y_name}"
                         member_index[tile_key] = member
 
-        logger.info(
+        logger.debug(
             "Built tar index for %s: %d tiles, zoom levels %s",
             tar_path.name,
             len(member_index),
@@ -118,7 +118,7 @@ class TarManager:
             if tileset_name not in self.tileset_locks:
                 self.tileset_locks[tileset_name] = asyncio.Lock()
 
-            logger.info("Initializing tar tileset '%s'...", tileset_name)
+            logger.debug("Initializing tar tileset '%s'...", tileset_name)
 
             try:
                 # Build index (runs in thread pool to avoid blocking)
@@ -139,7 +139,7 @@ class TarManager:
                     "last_rebuilt": None,
                 }
 
-                logger.info(
+                logger.debug(
                     "Tileset '%s': Indexed %d tiles from tar archive",
                     tileset_name,
                     len(member_index),
