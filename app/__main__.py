@@ -83,11 +83,12 @@ def main() -> None:
     """
     args = parse_arguments()
 
-    # Configure logging level
+    # Configure logging with level prefix
+    log_format = "%(levelname)s:\t%(message)s"
     if args.event_mode:
-        logging.basicConfig(level=logging.WARNING)
+        logging.basicConfig(level=logging.WARNING, format=log_format)
     else:
-        logging.basicConfig(level=logging.INFO)
+        logging.basicConfig(level=logging.INFO, format=log_format)
 
     # Validate configuration early to avoid worker crashes
     try:
