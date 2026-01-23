@@ -346,8 +346,10 @@ cp env/.env.example env/.env
 # 2. Edit config/config.json to define your tilesets
 
 # 3. Start the server
-docker-compose up
+docker-compose --env-file env/.env up
 ```
+
+Note: The `--env-file` flag is required because Docker Compose only reads `.env` from the project root by default. Using the flag explicitly points to our `env/` folder location.
 
 ### Configuration Files
 
