@@ -212,6 +212,45 @@ def test_cache_headers_on_tile(client):
     assert "Last-Modified" in response.headers
 
 
+def test_304_not_modified_directory(client):
+    """Test that conditional requests return 304 for directory tiles."""
+    # First request to get ETag
+    response = client.get("/test_directory/10/0/0.png")
+    assert response.status_code == 200
+    etag = response.headers.get("ETag")
+    assert etag is not None
+
+    # Second request with If-None-Match
+    response = client.get("/test_directory/10/0/0.png", headers={"If-None-Match": etag})
+    assert response.status_code == 304
+    assert len(response.content) == 0  # No body for 304
+
+
+def test_304_not_modified_tar(client):
+    """Test that conditional requests return 304 for tar tiles."""
+    # First request to get ETag
+    response = client.get("/test_tar_uncompressed/10/0/0.png")
+    assert response.status_code == 200
+    etag = response.headers.get("ETag")
+    assert etag is not None
+
+    # Second request with If-None-Match
+    response = client.get(
+        "/test_tar_uncompressed/10/0/0.png", headers={"If-None-Match": etag}
+    )
+    assert response.status_code == 304
+    assert len(response.content) == 0  # No body for 304
+
+
+def test_no_304_with_wrong_etag(client):
+    """Test that wrong ETag still returns full response."""
+    response = client.get(
+        "/test_directory/10/0/0.png", headers={"If-None-Match": '"wrong-etag"'}
+    )
+    assert response.status_code == 200
+    assert len(response.content) > 0
+
+
 # ============================================================================
 # App Configuration Tests
 # ============================================================================

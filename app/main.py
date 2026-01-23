@@ -16,6 +16,7 @@ Usage:
     uvicorn app.main:get_app --factory --host 0.0.0.0 --port 8000 --workers 4
 """
 
+import asyncio
 import email.utils
 import logging
 import os
@@ -23,7 +24,7 @@ from contextlib import asynccontextmanager
 from io import BytesIO
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
@@ -380,22 +381,39 @@ def create_app(config_path: str, do_scan: bool = True) -> FastAPI:
         if source_type == "directory":
             # Directory-based serving
             base_dir = tileset_info["source_path"]
-            tile_path, tried_extensions = find_tile_path(base_dir, z, x, y_name)
+
+            # Run sync file operations in thread pool to avoid blocking event loop
+            tile_path, tried_extensions = await asyncio.to_thread(
+                find_tile_path, base_dir, z, x, y_name
+            )
 
             if not tile_path:
                 raise TileNotFoundError(tileset_name, z, x, y_name, tried_extensions)
 
-            # Verify file is readable
+            # Verify file is readable (in thread pool)
             try:
-                st = tile_path.stat()
+                st = await asyncio.to_thread(tile_path.stat)
             except Exception as e:
                 raise TileCorruptedError(
                     tileset_name, z, x, y_name, f"Cannot stat file: {str(e)}"
                 )
 
+            etag = f'W/"{st.st_mtime_ns}-{st.st_size}"'
+
+            # Check for conditional request (304 Not Modified)
+            if_none_match = request.headers.get("If-None-Match")
+            if if_none_match and if_none_match == etag:
+                return Response(
+                    status_code=304,
+                    headers={
+                        "ETag": etag,
+                        "Cache-Control": "public, max-age=86400, immutable",
+                    },
+                )
+
             headers = {
                 "Cache-Control": "public, max-age=86400, immutable",
-                "ETag": f'W/"{st.st_mtime_ns}-{st.st_size}"',
+                "ETag": etag,
                 "Last-Modified": email.utils.formatdate(st.st_mtime, usegmt=True),
                 "X-Tile-Server": "event-optimized",
                 "X-Cache-Strategy": "local-event",
@@ -417,11 +435,16 @@ def create_app(config_path: str, do_scan: bool = True) -> FastAPI:
         elif source_type == "tar":
             # Tar archive-based serving
             tar_manager = request.app.state.tar_manager
+            if_none_match = request.headers.get("If-None-Match")
 
             try:
                 tile_data, media_type, headers = await tar_manager.get_tile_from_tar(
-                    tileset_name, z, x, y_name
+                    tileset_name, z, x, y_name, if_none_match=if_none_match
                 )
+
+                # Check for 304 Not Modified (tile_data is None)
+                if tile_data is None:
+                    return Response(status_code=304, headers=headers)
 
                 return StreamingResponse(
                     BytesIO(tile_data),

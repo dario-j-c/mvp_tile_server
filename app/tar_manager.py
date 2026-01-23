@@ -6,7 +6,7 @@ import email.utils
 import logging
 import tarfile
 from pathlib import Path
-from typing import Any, Dict, Set, Tuple
+from typing import Any, Dict, Optional, Set, Tuple
 
 from app.exceptions import (
     TarIndexUnavailableError,
@@ -219,8 +219,13 @@ class TarManager:
                 raise
 
     async def get_tile_from_tar(
-        self, tileset_name: str, z: int, x: int, y_name: str
-    ) -> Tuple[bytes, str, Dict[str, str]]:
+        self,
+        tileset_name: str,
+        z: int,
+        x: int,
+        y_name: str,
+        if_none_match: Optional[str] = None,
+    ) -> Tuple[Optional[bytes], str, Dict[str, str]]:
         """
         Thread-safe tile extraction from tar archive.
 
@@ -229,9 +234,11 @@ class TarManager:
             z: Zoom level.
             x: X tile coordinate.
             y_name: Y coordinate with file extension (e.g., "123.png").
+            if_none_match: ETag from client for conditional request (304 support).
 
         Returns:
             Tuple of (tile_data, media_type, response_headers).
+            tile_data is None if if_none_match matches (304 response).
 
         Raises:
             TarIndexUnavailableError: If index is not ready.
@@ -266,6 +273,21 @@ class TarManager:
         if not tile_member:
             raise TileNotFoundError(tileset_name, z, x, y_name, tried_extensions)
 
+        # Build ETag and check for conditional request (304 Not Modified)
+        etag = f'W/"{tile_member.mtime}-{tile_member.size}"'
+        tile_path = Path(tile_member.name)
+        media_type = (
+            media_type_for_suffix(tile_path.suffix) or "application/octet-stream"
+        )
+
+        if if_none_match and if_none_match == etag:
+            # Return None for tile_data to signal 304 response
+            headers = {
+                "ETag": etag,
+                "Cache-Control": "public, max-age=86400, immutable",
+            }
+            return None, media_type, headers
+
         # Extract tile data with lock to prevent concurrent reads
         async with self.tileset_locks[tileset_name]:
             try:
@@ -290,15 +312,10 @@ class TarManager:
                     tileset_name, z, x, y_name, f"Extraction failed: {str(e)}"
                 )
 
-        # Prepare response
-        tile_path = Path(tile_member.name)
-        media_type = (
-            media_type_for_suffix(tile_path.suffix) or "application/octet-stream"
-        )
-
+        # Prepare response headers
         headers = {
             "Cache-Control": "public, max-age=86400, immutable",
-            "ETag": f'W/"{tile_member.mtime}-{tile_member.size}"',
+            "ETag": etag,
             "Last-Modified": email.utils.formatdate(tile_member.mtime, usegmt=True),
             "X-Tile-Server": "event-optimized",
             "X-Cache-Strategy": "local-event",
