@@ -98,7 +98,7 @@ def inspect_tar_structure(
                 # Check member limit
                 if total_members >= max_members:
                     print(
-                        f"\n⚠️  Reached member limit ({max_members}). "
+                        f"\n⚠  Reached member limit ({max_members}). "
                         "Stopping scan for speed.\n"
                     )
                     break
@@ -242,7 +242,7 @@ def print_results(tar_path: Path, compression: str, results: Dict):
 
         # Performance warning for compressed archives
         if compression in ["gzip", "bzip2", "xz"]:
-            print("⚠️  PERFORMANCE WARNING:")
+            print("⚠  PERFORMANCE WARNING:")
             print(f"   This is a {compression}-compressed archive.")
             print("   Compressed archives are 5-10x slower than uncompressed.")
             print("   Consider using uncompressed .tar files for production.")

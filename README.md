@@ -46,7 +46,7 @@ uv run python -m app tilesets.json -p 8000
 - `config_file` - Path to configuration JSON (default: `tilesets.json`)
 - `-p, --port` - Port to bind (default: `8000`)
 - `-b, --bind` - Address to bind (default: `0.0.0.0`)
-- `-w, --workers` - Number of uvicorn workers (default: `1`)
+- `-w, --workers` - Number of uvicorn workers (default: `4`)
 - `--no-scan` - Skip initial tile scanning for faster startup
 - `--reload` - Enable auto-reload for development
 
@@ -325,3 +325,79 @@ tar -cf tiles.tar -C /source/path .
 # Avoid compression for production
 # tar -czf tiles.tar.gz -C /source/path .  # Slower!
 ```
+
+## Docker
+
+The server can be run with Docker for containerized deployments.
+
+### Quick Start with Docker Compose
+
+```bash
+# Using test data (default)
+docker-compose up
+
+# With custom tile data path
+TILE_DATA_PATH=/path/to/your/tiles docker-compose up
+```
+
+### Building the Image
+
+```bash
+docker build -t tile-server .
+```
+
+### Running with Docker
+
+```bash
+# Run with mounted tile data and config
+docker run -d \
+  -p 8000:8000 \
+  -v /path/to/tiles:/app/data:ro \
+  -v /path/to/config.json:/app/config.json:ro \
+  tile-server
+```
+
+### Docker Configuration
+
+The container expects:
+- **Config file** mounted at `/app/config.json`
+- **Tile data** mounted under `/app/data/`
+
+Edit `config.json` in the project root to define your tilesets. This file is mounted into the container and should reference container paths (`/app/data/...`). See `config_example.json` for a documented template.
+
+Example `config.json`:
+
+```json
+{
+  "tilesets": {
+    "osm": "/app/data/osm",
+    "satellite": "/app/data/satellite.tar"
+  }
+}
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TILE_SERVER_PORT` | `8000` | Host port mapping |
+| `TILE_DATA_PATH` | `./test_data` | Host path to tile data |
+| `LOG_LEVEL` | `info` | Logging verbosity |
+
+### Production Example
+
+```yaml
+# docker-compose.override.yml
+services:
+  tile-server:
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./production-config.json:/app/config.json:ro
+      - /data/tiles:/app/data:ro
+    restart: always
+```
+
+## License
+
+MIT
