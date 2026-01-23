@@ -6,5 +6,14 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "fastapi[standard]>=0.116.1",
+    "typing-extensions>=4.14.1",
     "uvicorn[standard]>=0.35.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx[brotli,zstd]>=0.28.1",
+    "hypothesis>=6.141.1",
+    "pytest>=8.4.2",
+    "pytest-asyncio>=1.2.0",
 ]

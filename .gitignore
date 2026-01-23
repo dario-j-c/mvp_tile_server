@@ -1,8 +1,31 @@
+# Tile data
 tiles/
 data/
 !data/.gitkeep
+
+# Virtual environments
 venv/
 .venv/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+
+# Testing
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+
+# Build artifacts
+dist/
+build/
+
+# OS files
 .DS_Store
 
+# Project-specific
 tiletest.html
+test_data/test_config.json

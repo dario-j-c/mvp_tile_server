@@ -1,2 +1,9 @@
+# Production dependencies
 fastapi[standard]
 uvicorn[standard]
+
+# Development dependencies
+httpx[brotli,zstd]
+hypothesis
+pytest
+pytest-asyncio
