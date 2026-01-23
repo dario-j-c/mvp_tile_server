@@ -62,6 +62,12 @@ def create_app(config_path: str, do_scan: bool = True) -> FastAPI:
     Raises:
         ValueError: If configuration file is invalid.
     """
+    # Configure logging for worker processes (basicConfig is idempotent)
+    pid = os.getpid()
+    logging.basicConfig(
+        level=logging.INFO,
+        format=f"%(levelname)s:\t[WORKER {pid}] %(message)s",
+    )
 
     # Load and validate tileset configuration
     try:

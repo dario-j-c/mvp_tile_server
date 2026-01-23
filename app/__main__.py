@@ -84,7 +84,7 @@ def main() -> None:
     args = parse_arguments()
 
     # Configure logging with level prefix
-    log_format = "%(levelname)s:\t%(message)s"
+    log_format = "%(levelname)s:\t[MAIN] %(message)s"
     if args.event_mode:
         logging.basicConfig(level=logging.WARNING, format=log_format)
     else:
