@@ -32,3 +32,4 @@ env/.env
 # Project-specific
 tiletest.html
 test_data/test_config.json
+config/config.json
