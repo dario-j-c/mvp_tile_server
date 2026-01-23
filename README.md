@@ -25,9 +25,6 @@ In the future, other formats may be supported (MBTiles, Cloud Optimised GeoTiffs
 ```bash
 # Using uv (recommended)
 uv sync
-
-# Or using pip
-pip install -e .
 ```
 
 ## Usage
@@ -39,7 +36,7 @@ Run the tile server with a configuration file:
 python -m app [config_file] -p [port] -b [address]
 
 # Or using uv
-uv run python -m app tilesets.json -p 8000
+uv run python -m app [config_file] -p [port] -b [address]
 ```
 
 **Options:**
@@ -69,6 +66,7 @@ mvp_tile_server/
 │   ├── .env.example        # Environment variables template
 │   └── .env                # Your environment settings (git-ignored)
 ├── tests/                  # Test suite
+│   ├── conftest.py         # Pytest fixtures and test setup
 │   ├── test_integration.py # API endpoint tests
 │   ├── test_unit.py        # Unit tests
 │   └── test_property.py    # Property-based tests
@@ -266,9 +264,6 @@ Run the test suite:
 ```bash
 # Run all tests
 uv run pytest tests/ -v
-
-# Run with coverage
-uv run pytest tests/ --cov=app --cov-report=term-missing
 ```
 
 The test suite includes:
@@ -319,18 +314,18 @@ The server serves tiles **directly from tar archives without extraction**, strea
 
 ### Optimization Tips
 
-1. **Use uncompressed tar files** for production deployments
-2. **Disable startup scan** with `--no-scan` flag for faster boot
-3. **Use multiple workers** (`--workers 4`) to handle concurrent requests
-4. **Pre-build tar files** with standard `tar -cf` command (no compression)
+1. **Use directories when possible** - Direct file access is fastest
+2. **Use uncompressed tar files** when tar is needed (disk space, inode limits)
+3. **Disable startup scan** with `--no-scan` flag for faster boot
+4. **Use multiple workers** (`--workers 8`) to handle concurrent requests
 
-Example creating an optimized tar file:
+If you need to use tar archives, create them uncompressed:
 ```bash
-# Create uncompressed tar (fast serving)
+# Create uncompressed tar (recommended)
 tar -cf tiles.tar -C /source/path .
 
-# Avoid compression for production
-# tar -czf tiles.tar.gz -C /source/path .  # Slower!
+# Avoid compression - it's slower per request
+# tar -czf tiles.tar.gz -C /source/path .
 ```
 
 ## Docker
