@@ -1,36 +1,80 @@
-# Introduction
-This is a MVP to ensure we can serve multiple tile sets to another app locally.
+# MVP Tile Server
 
-Supports serving different tile sets from:
+A high-performance FastAPI tile server supporting multiple tilesets from directories and tar archives.
+
+## Overview
+
+This is an MVP tile server designed to serve multiple tile sets locally. It supports:
+
 - **Directories** - Traditional file system folders
 - **Tar Archives** - Uncompressed or compressed tar files (no extraction required)
 
-In the future, another methodology may be used (for example serving MBTiles, Cloud Optimised GeoTiffs), but this serves the purpose of allowing work to be done while this occurs.
+In the future, other formats may be supported (MBTiles, Cloud Optimised GeoTiffs), but this serves the immediate need.
 
 ## Key Features
+
 - Multiple tileset support with independent configurations
 - Serve tiles directly from tar archives without extraction
 - Auto-detection of tile structure within tar files
 - Support for uncompressed (.tar) and compressed (.tar.gz, .tar.bz2, .tar.xz) formats
+- Admin endpoints for tar index management
 - Fast(ish) tar inspection utility for configuration assistance
 
-# Usage
-
-To setup the tile server, create a configuration file and run:
+## Installation
 
 ```bash
-python3 main.py [config_file] -p [port to use] -b [address to bind]
+# Using uv (recommended)
+uv sync
+
+# Or using pip
+pip install -e .
 ```
 
-- The config file defaults to `tilesets.json`
-- The port defaults to 8000
-- The address defaults to 0.0.0.0
+## Usage
+
+Run the tile server with a configuration file:
+
+```bash
+# Using the app module (recommended)
+python -m app [config_file] -p [port] -b [address]
+
+# Or using uv
+uv run python -m app tilesets.json -p 8000
+```
+
+**Options:**
+- `config_file` - Path to configuration JSON (default: `tilesets.json`)
+- `-p, --port` - Port to bind (default: `8000`)
+- `-b, --bind` - Address to bind (default: `0.0.0.0`)
+- `-w, --workers` - Number of uvicorn workers (default: `1`)
+- `--no-scan` - Skip initial tile scanning for faster startup
+- `--reload` - Enable auto-reload for development
+
+## Project Structure
+
+```
+mvp_tile_server/
+├── app/                    # Main application package
+│   ├── __init__.py         # Package exports
+│   ├── __main__.py         # CLI entry point
+│   ├── config.py           # Configuration loading and validation
+│   ├── exceptions.py       # Custom exception classes
+│   ├── main.py             # FastAPI application and routes
+│   ├── tar_manager.py      # Tar archive handling
+│   └── utils.py            # Utility functions
+├── tests/                  # Test suite
+│   ├── test_integration.py # API endpoint tests
+│   ├── test_unit.py        # Unit tests
+│   └── test_property.py    # Property-based tests
+├── inspect_tar.py          # Tar inspection utility
+└── tilesets.json           # Example configuration
+```
 
 ## Configuration File
 
 Create a JSON file defining your tilesets. The server supports both **directory** and **tar archive** sources.
 
-### Directory-Based Configuration (Original Method)
+### Directory-Based Configuration
 ```json
 {
   "tilesets": {
@@ -90,12 +134,35 @@ Create a JSON file defining your tilesets. The server supports both **directory*
 - Each source must contain the standard `{z}/{x}/{y.ext}` structure
 - For tar files, tiles can be at root or in a subdirectory (specify with `base_path`)
 
+## API Endpoints
+
+### Tile Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /tiles/{tileset}/{z}/{x}/{y.ext}` | Retrieve a tile |
+
+### Information Endpoints
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /` | Server status and tileset overview |
+| `GET /tilesets/{tileset_name}` | Detailed tileset information |
+| `GET /health` | Health check |
+
+### Admin Endpoints (Tar Archives)
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /admin/rebuild/{tileset_name}` | Rebuild tar index |
+| `GET /admin/status/{tileset_name}` | Get tar index status |
+
 ## Inspecting Tar Archives
 
 Before configuring tar archives, use the inspection utility to understand the structure:
 
 ```bash
-python3 inspect_tar.py /path/to/your/tiles.tar
+python inspect_tar.py /path/to/your/tiles.tar
 ```
 
 **Options:**
@@ -114,28 +181,18 @@ Members scanned: 1000
 Scan time: 2.45s
 
 ----------------------------------------------------------------------
-TOP-LEVEL STRUCTURE
-----------------------------------------------------------------------
-  tiles/
-
-----------------------------------------------------------------------
 TILE DETECTION
 ----------------------------------------------------------------------
 
-✓ Found tiles matching {z}/{x}/{y.ext} pattern!
+Found tiles matching {z}/{x}/{y.ext} pattern!
   Zoom levels detected: [10, 11, 12, 13]
   File extensions: ['.png', '.webp']
-
-  Sample tile paths:
-    tiles/10/512/256.png
-    tiles/11/1024/512.png
-    tiles/12/2048/1024.webp
 
 ----------------------------------------------------------------------
 RECOMMENDED CONFIGURATION
 ----------------------------------------------------------------------
 
-✓ Detected base path: 'tiles'
+Detected base path: 'tiles'
 
 Add to your tilesets.json:
 
@@ -148,12 +205,6 @@ Add to your tilesets.json:
   }
 }
 ```
-
-This utility helps you:
-- Verify tar file contains valid tiles
-- Identify the correct `base_path` for nested structures
-- Detect compression type and get performance warnings
-- Preview sample tiles before deployment
 
 ## File Structure
 
@@ -172,7 +223,7 @@ tileset_directory/
 ```
 
 ### Tar Archive Structure
-Tar archives must contain the same `{z}/{x}/{y.ext}` structure, either at the root or within a subdirectory:
+Tar archives must contain the same `{z}/{x}/{y.ext}` structure:
 
 **Root-level tiles:**
 ```
@@ -199,59 +250,71 @@ tiles.tar
     └── ...
 ```
 
-**Important:** The server accommodates **one large tar file per tileset**. Do not split tiles across multiple tar files for a single tileset.
+**Note:** The server accommodates **one large tar file per tileset**. Do not split tiles across multiple tar files for a single tileset.
 
-## URLs
+## Testing
 
-Tiles are served at: `http://localhost:8000/{tileset_name}/{z}/{x}/{y.ext}`
+Run the test suite:
 
-Examples:
-- `http://localhost:8000/osm/12/1234/5678.png`
-- `http://localhost:8000/satellite/10/512/256.jpg`
+```bash
+# Run all tests
+uv run pytest tests/ -v
 
-## Additional Endpoints
+# Run with coverage
+uv run pytest tests/ --cov=app --cov-report=term-missing
+```
 
-- `GET /` - Server status and tileset overview
-- `GET /tilesets/{tileset_name}` - Detailed tileset information
-- `GET /health` - Health check
+The test suite includes:
+- **Integration tests** - API endpoint testing with TestClient
+- **Unit tests** - Individual function and class testing
+- **Property-based tests** - Hypothesis-powered fuzzing
 
 ## Error Handling
 
-The server validates all tileset configurations on startup and will show comprehensive error messages if paths don't exist or names are invalid.
+The server validates all tileset configurations on startup and displays comprehensive error messages if paths don't exist or names are invalid.
 
-Fix all reported issues before the server will start.
+**Error Response Format:**
+```json
+{
+  "error": "tile_not_found",
+  "message": "Tile not found at coordinates",
+  "tileset": "osm",
+  "z": 10,
+  "x": 512,
+  "y": 256,
+  "extensions_tried": [".png", ".jpg", ".webp", ".pbf"]
+}
+```
 
 ## Performance Considerations
 
 ### Tar Archive Performance
 
-The server serves tiles **directly from tar archives without extraction**, streaming tile data on demand. Performance should vary by compression type.
+The server serves tiles **directly from tar archives without extraction**, streaming tile data on demand.
 
-**Key Points:**
-- **Uncompressed `.tar` files are strongly recommended** for production use
-- The performance overhead is likely minimal for uncompressed archives
-- Compressed formats will require CPU-intensive decompression for each tile request
+**Recommendations:**
+- **Uncompressed `.tar` files are strongly recommended** for production
+- Compressed formats require CPU-intensive decompression per tile request
 - The server warns on startup when using compressed tar files
-- Startup time: Building tar indexes takes ~10-50ms per archive (one-time **per worker**)
+- Startup time: Building tar indexes takes ~10-50ms per archive (one-time per worker)
 
 ### When to Use Tar Archives
 
 **Use tar archives when:**
-- Disk space is limited and you cannot extract tiles
+- Disk space is limited
 - Filesystem has inode limits (tar = 1 file instead of thousands)
 - Read-only environment where extraction is not possible
 - Simplifying deployment (single file instead of directory tree)
 
 **Use directories when:**
 - Maximum performance is critical
-- Disk space is plentiful
-- Tiles need frequent updates (directories are easier to modify)
+- Tiles need frequent updates
 
 ### Optimization Tips
 
 1. **Use uncompressed tar files** for production deployments
-2. **Disable startup scan** with `--no-scan` flag for faster boot (especially with large tar files)
-3. **Use multiple workers** (`--workers 4`) to handle concurrent tile requests
+2. **Disable startup scan** with `--no-scan` flag for faster boot
+3. **Use multiple workers** (`--workers 4`) to handle concurrent requests
 4. **Pre-build tar files** with standard `tar -cf` command (no compression)
 
 Example creating an optimized tar file:
