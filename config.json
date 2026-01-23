@@ -1,0 +1,11 @@
+{
+  "tilesets": {
+    "test_directory": "/app/data/directory_tiles",
+    "test_tar_uncompressed": "/app/data/tiles_uncompressed.tar",
+    "test_tar_compressed": "/app/data/tiles_compressed.tar.gz",
+    "test_tar_nested": {
+      "source": "/app/data/tiles_nested.tar",
+      "base_path": "map_data/tiles"
+    }
+  }
+}

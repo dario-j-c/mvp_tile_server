@@ -1,0 +1,39 @@
+# Git
+.git
+.gitignore
+
+# Python virtual environments and cache
+.venv
+venv
+__pycache__
+*.pyc
+*.pyo
+*.egg-info
+
+# Testing
+test_data/
+tests/
+.pytest_cache/
+.hypothesis/
+.coverage
+htmlcov/
+
+# Documentation
+docs/
+*.md
+
+# Development files
+.python-version
+pyproject.toml
+uv.lock
+
+# Docker (avoid recursive copy)
+.dockerignore
+docker-compose.yml
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store

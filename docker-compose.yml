@@ -1,0 +1,48 @@
+# MVP Tile Server - Docker Compose Configuration
+#
+# Tile Data Mounting:
+#   The server expects tiles at /app/data inside the container.
+#   Mount your tile directories/files to subdirectories under /app/data.
+#
+#   Example structure:
+#     /app/data/
+#       osm/              -> directory tileset
+#       satellite.tar     -> tar archive tileset
+#       topo.tar.gz       -> compressed tar tileset
+#
+#   Then reference in config.json as:
+#     "osm": "/app/data/osm"
+#     "satellite": "/app/data/satellite.tar"
+#
+# Usage:
+#   1. Edit the volumes section below to mount your tile data
+#   2. Update config.json to match your tileset paths
+#   3. Run: docker-compose up
+
+services:
+  tile-server:
+    build: .
+    ports:
+      - "${TILE_SERVER_PORT:-8000}:8000"
+    volumes:
+      # Config file (required)
+      - ./config.json:/app/config.json:ro
+
+      # Tile data mount - customize for your setup
+      # Option 1: Mount a single directory containing all tilesets
+      - ${TILE_DATA_PATH:-./test_data}:/app/data:ro
+
+      # Option 2: Mount individual tilesets (uncomment and customize)
+      # - /path/to/osm/tiles:/app/data/osm:ro
+      # - /path/to/satellite.tar:/app/data/satellite.tar:ro
+
+    environment:
+      # Optional: Set log level
+      - LOG_LEVEL=${LOG_LEVEL:-info}
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
