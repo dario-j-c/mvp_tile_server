@@ -26,6 +26,7 @@
 
 services:
   tile-server:
+    container_name: tile-server
     build: .
     ports:
       - "${TILE_SERVER_PORT:-8000}:8000"
