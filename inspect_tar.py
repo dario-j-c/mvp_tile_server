@@ -56,11 +56,12 @@ def detect_compression(tar_path: Path) -> str:
 
 def format_size(size_bytes: int) -> str:
     """Format byte size to human-readable string."""
+    size: float = float(size_bytes)
     for unit in ["B", "KB", "MB", "GB", "TB"]:
-        if size_bytes < 1024.0:
-            return f"{size_bytes:.1f} {unit}"
-        size_bytes /= 1024.0
-    return f"{size_bytes:.1f} PB"
+        if size < 1024.0:
+            return f"{size:.1f} {unit}"
+        size /= 1024.0
+    return f"{size:.1f} PB"
 
 
 def inspect_tar_structure(
@@ -114,9 +115,8 @@ def inspect_tar_structure(
                 if member.isfile():
                     match = tile_pattern.match(member.name)
                     if match:
-                        base_path = match.group(1)
+                        # Groups: (1) base_path, (2) z, (3) x, (4) y_name
                         z = int(match.group(2))
-                        x = int(match.group(3))
                         y_name = match.group(4)
 
                         zoom_levels.add(z)
