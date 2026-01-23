@@ -62,12 +62,19 @@ mvp_tile_server/
 │   ├── main.py             # FastAPI application and routes
 │   ├── tar_manager.py      # Tar archive handling
 │   └── utils.py            # Utility functions
+├── config/                 # Configuration files
+│   ├── config.json         # Active configuration (edit for Docker)
+│   └── config_example.json # Documented example with comments
+├── env/                    # Environment files
+│   ├── .env.example        # Environment variables template
+│   └── .env                # Your environment settings (git-ignored)
 ├── tests/                  # Test suite
 │   ├── test_integration.py # API endpoint tests
 │   ├── test_unit.py        # Unit tests
 │   └── test_property.py    # Property-based tests
-├── inspect_tar.py          # Tar inspection utility
-└── tilesets.json           # Example configuration
+├── docker-compose.yml      # Docker Compose configuration
+├── Dockerfile              # Container build instructions
+└── inspect_tar.py          # Tar inspection utility
 ```
 
 ## Configuration File
@@ -333,39 +340,47 @@ The server can be run with Docker for containerized deployments.
 ### Quick Start with Docker Compose
 
 ```bash
-# Using test data (default)
+# 1. Copy and configure environment
+cp env/.env.example env/.env
+
+# 2. Edit config/config.json to define your tilesets
+
+# 3. Start the server
 docker-compose up
-
-# With custom tile data path
-TILE_DATA_PATH=/path/to/your/tiles docker-compose up
 ```
 
-### Building the Image
+### Configuration Files
 
-```bash
-docker build -t tile-server .
+```
+config/
+  config.json         # Your tileset configuration (edit this)
+  config_example.json # Documented template with examples
+env/
+  .env.example        # Environment template
+  .env                # Your environment settings (copy from .env.example)
 ```
 
-### Running with Docker
+Note: The `env/.env` file is git-ignored as it may contain environment-specific settings.
 
-```bash
-# Run with mounted tile data and config
-docker run -d \
-  -p 8000:8000 \
-  -v /path/to/tiles:/app/data:ro \
-  -v /path/to/config.json:/app/config.json:ro \
-  tile-server
-```
+### Environment Variables
+
+Copy `env/.env.example` to `env/.env` and customize:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TILE_SERVER_PORT` | `8000` | Host port mapping |
+| `TILE_DATA_PATH` | `./test_data` | Host path to tile data |
+| `LOG_LEVEL` | `info` | Logging verbosity (debug, info, warning, error) |
 
 ### Docker Configuration
 
 The container expects:
-- **Config file** mounted at `/app/config.json`
-- **Tile data** mounted under `/app/data/`
+- **Config file** mounted at `/app/config.json` (from `config/config.json`)
+- **Tile data** mounted under `/app/data/` (from `TILE_DATA_PATH`)
 
-Edit `config.json` in the project root to define your tilesets. This file is mounted into the container and should reference container paths (`/app/data/...`). See `config_example.json` for a documented template.
+Edit `config/config.json` to define your tilesets. This file should reference container paths (`/app/data/...`). See `config/config_example.json` for a documented template.
 
-Example `config.json`:
+Example `config/config.json`:
 
 ```json
 {
@@ -376,13 +391,21 @@ Example `config.json`:
 }
 ```
 
-### Environment Variables
+### Building the Image
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TILE_SERVER_PORT` | `8000` | Host port mapping |
-| `TILE_DATA_PATH` | `./test_data` | Host path to tile data |
-| `LOG_LEVEL` | `info` | Logging verbosity |
+```bash
+docker build -t tile-server .
+```
+
+### Running with Docker (without Compose)
+
+```bash
+docker run -d \
+  -p 8000:8000 \
+  -v /path/to/tiles:/app/data:ro \
+  -v $(pwd)/config/config.json:/app/config.json:ro \
+  tile-server
+```
 
 ### Production Example
 
@@ -390,10 +413,8 @@ Example `config.json`:
 # docker-compose.override.yml
 services:
   tile-server:
-    ports:
-      - "8000:8000"
     volumes:
-      - ./production-config.json:/app/config.json:ro
+      - ./config/config.json:/app/config.json:ro
       - /data/tiles:/app/data:ro
     restart: always
 ```

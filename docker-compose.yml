@@ -1,8 +1,13 @@
 # MVP Tile Server - Docker Compose Configuration
 #
+# Setup:
+#   1. Copy .env.example to .env and customize values
+#   2. Edit config/config.json to define your tilesets
+#   3. Run: docker-compose up
+#
 # Tile Data Mounting:
 #   The server expects tiles at /app/data inside the container.
-#   Mount your tile directories/files to subdirectories under /app/data.
+#   Set TILE_DATA_PATH in .env to point to your tile data directory.
 #
 #   Example structure:
 #     /app/data/
@@ -10,7 +15,7 @@
 #       satellite.tar     -> tar archive tileset
 #       topo.tar.gz       -> compressed tar tileset
 #
-#   Then reference in config.json as:
+#   Then reference in config/config.json as:
 #     "osm": "/app/data/osm"
 #     "satellite": "/app/data/satellite.tar"
 #
@@ -24,21 +29,19 @@ services:
     build: .
     ports:
       - "${TILE_SERVER_PORT:-8000}:8000"
+    env_file:
+      - ./env/.env
     volumes:
       # Config file (required)
-      - ./config.json:/app/config.json:ro
+      - ./config/config.json:/app/config.json:ro
 
-      # Tile data mount - customize for your setup
-      # Option 1: Mount a single directory containing all tilesets
+      # Tile data mount - set TILE_DATA_PATH in .env
       - ${TILE_DATA_PATH:-./test_data}:/app/data:ro
 
-      # Option 2: Mount individual tilesets (uncomment and customize)
+      # Alternative: Mount individual tilesets (uncomment and customize)
       # - /path/to/osm/tiles:/app/data/osm:ro
       # - /path/to/satellite.tar:/app/data/satellite.tar:ro
 
-    environment:
-      # Optional: Set log level
-      - LOG_LEVEL=${LOG_LEVEL:-info}
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]

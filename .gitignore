@@ -26,6 +26,9 @@ build/
 # OS files
 .DS_Store
 
+# Environment files
+env/.env
+
 # Project-specific
 tiletest.html
 test_data/test_config.json
