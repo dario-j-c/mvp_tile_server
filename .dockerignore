@@ -34,6 +34,7 @@ docker-compose.yml
 # IDE
 .vscode/
 .idea/
+.zed/
 
 # OS files
 .DS_Store

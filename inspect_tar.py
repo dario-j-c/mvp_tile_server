@@ -198,7 +198,7 @@ def print_results(tar_path: Path, compression: str, results: Dict):
     print("-" * 70)
 
     if results["tile_samples"]:
-        print(f"\n✓ Found tiles matching {{z}}/{{x}}/{{y.ext}} pattern!")
+        print("\n✓ Found tiles matching {z}/{x}/{y.ext} pattern!")
         print(f"  Zoom levels detected: {results['zoom_levels']}")
         print(f"  File extensions: {list(results['extensions'].keys())}")
 
@@ -225,7 +225,7 @@ def print_results(tar_path: Path, compression: str, results: Dict):
             print("\nAdd to your tilesets.json:")
             print("\n{")
             print('  "tilesets": {')
-            print(f'    "your_tileset_name": {{')
+            print('    "your_tileset_name": {{')
             print(f'      "source": "{tar_path}",')
             print(f'      "base_path": "{base_path}"')
             print("    }")
