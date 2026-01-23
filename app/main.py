@@ -155,10 +155,12 @@ def create_app(config_path: str, do_scan: bool = True) -> FastAPI:
     # Custom exception handler for TileServerError
     @app.exception_handler(TileServerError)
     async def tile_server_error_handler(request: Request, exc: TileServerError):
+        error_code = exc.error_code or "INTERNAL_ERROR"
+        logger.warning("%s - %s [%s]", error_code, exc.message, request.url.path)
         return JSONResponse(
             status_code=exc.status_code,
             content={
-                "error": exc.error_code or "INTERNAL_ERROR",
+                "error": error_code,
                 "message": exc.message,
                 "path": str(request.url.path),
             },
