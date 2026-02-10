@@ -751,6 +751,64 @@ def test_scan_tiles_tar_with_base_path(temp_dir):
     assert zoom_levels == [10]
 
 
+def test_scan_tiles_directory_zoom_discovery_survives_timeout(temp_dir):
+    """All zoom dirs are discovered even when tile counting times out."""
+    for z in [5, 10, 15]:
+        for x in range(10):
+            tile_dir = temp_dir / str(z) / str(x)
+            tile_dir.mkdir(parents=True)
+            for y in range(50):
+                (tile_dir / f"{y}.png").touch()
+
+    # timeout_seconds=0 forces phase-2 to time out immediately
+    tile_count, samples, zoom_levels, min_z, max_z = scan_tiles(
+        temp_dir, "directory", timeout_seconds=0
+    )
+
+    assert zoom_levels == [5, 10, 15]
+    assert min_z == 5
+    assert max_z == 15
+    assert tile_count >= 0
+
+
+def test_scan_tiles_directory_timeout_logs_warning(temp_dir, caplog):
+    """Timeout inside tile counting propagates out and logs a warning."""
+    import logging
+
+    for z in [1, 2]:
+        for x in range(5):
+            tile_dir = temp_dir / str(z) / str(x)
+            tile_dir.mkdir(parents=True)
+            for y in range(100):
+                (tile_dir / f"{y}.png").touch()
+
+    with caplog.at_level(logging.WARNING):
+        _, _, zoom_levels, _, _ = scan_tiles(temp_dir, "directory", timeout_seconds=0)
+
+    assert set(zoom_levels) == {1, 2}
+    assert any("timeout" in r.message.lower() for r in caplog.records)
+
+
+def test_scan_tiles_directory_no_timeout_counts_all(temp_dir):
+    """With generous timeout, two-phase scan produces correct full count."""
+    for z in [10, 11]:
+        for x in [0, 1]:
+            tile_dir = temp_dir / str(z) / str(x)
+            tile_dir.mkdir(parents=True)
+            (tile_dir / "0.png").touch()
+            (tile_dir / "1.png").touch()
+
+    tile_count, samples, zoom_levels, min_z, max_z = scan_tiles(
+        temp_dir, "directory", max_samples=5, timeout_seconds=60
+    )
+
+    assert tile_count == 8
+    assert zoom_levels == [10, 11]
+    assert min_z == 10
+    assert max_z == 11
+    assert len(samples) <= 5
+
+
 # ============================================================================
 # find_tile_in_tar_index Tests
 # ============================================================================

@@ -288,27 +288,48 @@ def scan_tiles(
     zoom_levels_found: Set[int] = set()
 
     if source_type == "directory":
-        # Original directory scanning logic
-        for z_dir in source_path.iterdir():
-            if time.time() - start_time > timeout_seconds:
+        # Phase 1: discover ALL zoom directories immediately (cheap name listing).
+        z_dirs = sorted(
+            [d for d in source_path.iterdir() if d.is_dir() and d.name.isdigit()],
+            key=lambda d: int(d.name),
+        )
+        for z_dir in z_dirs:
+            zoom_levels_found.add(int(z_dir.name))
+
+        # Phase 2: count tiles per zoom, checking timeout at every loop level.
+        timed_out = False
+        for z_dir in z_dirs:
+            if timed_out or time.time() - start_time > timeout_seconds:
                 logger.warning(
                     "Scan timeout reached for %s after %d tiles",
                     source_path.name,
                     tile_count,
                 )
                 break
-
-            if z_dir.is_dir() and z_dir.name.isdigit():
-                z = int(z_dir.name)
-                zoom_levels_found.add(z)
-                for x_dir in z_dir.iterdir():
-                    if x_dir.is_dir() and x_dir.name.isdigit():
-                        x = int(x_dir.name)
-                        for tile_file in x_dir.iterdir():
-                            if tile_file.is_file():
-                                tile_count += 1
-                                if len(sample_tiles) < max_samples:
-                                    sample_tiles.append(f"{z}/{x}/{tile_file.name}")
+            z = int(z_dir.name)
+            for x_dir in z_dir.iterdir():
+                if time.time() - start_time > timeout_seconds:
+                    timed_out = True
+                    break
+                if x_dir.is_dir() and x_dir.name.isdigit():
+                    x = int(x_dir.name)
+                    for tile_file in x_dir.iterdir():
+                        if time.time() - start_time > timeout_seconds:
+                            timed_out = True
+                            break
+                        if tile_file.is_file():
+                            tile_count += 1
+                            if len(sample_tiles) < max_samples:
+                                sample_tiles.append(f"{z}/{x}/{tile_file.name}")
+                    if timed_out:
+                        break
+            if timed_out:
+                logger.warning(
+                    "Scan timeout reached for %s after %d tiles",
+                    source_path.name,
+                    tile_count,
+                )
+                break
 
     elif source_type == "tar":
         # Tar archive scanning logic
