@@ -809,6 +809,121 @@ def test_scan_tiles_directory_no_timeout_counts_all(temp_dir):
     assert len(samples) <= 5
 
 
+def test_scan_tiles_directory_max_samples_caps(temp_dir):
+    """max_samples limits the number of sample tiles returned."""
+    for z in [10]:
+        for x in range(5):
+            tile_dir = temp_dir / str(z) / str(x)
+            tile_dir.mkdir(parents=True)
+            for y in range(10):
+                (tile_dir / f"{y}.png").touch()
+
+    # 50 tiles total, cap at 3
+    tile_count, samples, zoom_levels, min_z, max_z = scan_tiles(
+        temp_dir, "directory", max_samples=3, timeout_seconds=60
+    )
+
+    assert tile_count == 50
+    assert len(samples) == 3
+    assert zoom_levels == [10]
+
+
+def test_scan_tiles_tar_max_samples_caps(temp_dir):
+    """max_samples limits the number of sample tiles returned from tar."""
+    tar_path = temp_dir / "tiles.tar"
+    with tarfile.open(tar_path, "w") as tar:
+        tile_data = b"fake"
+        for z in [10]:
+            for x in range(5):
+                for y in range(10):
+                    tile_info = tarfile.TarInfo(name=f"{z}/{x}/{y}.png")
+                    tile_info.size = len(tile_data)
+                    tar.addfile(tile_info, BytesIO(tile_data))
+
+    # 50 tiles total, cap at 2
+    tile_count, samples, zoom_levels, min_z, max_z = scan_tiles(
+        tar_path, "tar", max_samples=2, timeout_seconds=60
+    )
+
+    assert tile_count == 50
+    assert len(samples) == 2
+    assert zoom_levels == [10]
+
+
+def test_scan_tiles_tar_timeout(temp_dir):
+    """Tar scanning respects timeout_seconds."""
+    tar_path = temp_dir / "tiles.tar"
+    with tarfile.open(tar_path, "w") as tar:
+        tile_data = b"fake"
+        for z in [5, 10, 15]:
+            for x in range(20):
+                for y in range(50):
+                    tile_info = tarfile.TarInfo(name=f"{z}/{x}/{y}.png")
+                    tile_info.size = len(tile_data)
+                    tar.addfile(tile_info, BytesIO(tile_data))
+
+    # 3000 tiles total, timeout=0 should produce a partial count
+    tile_count, samples, zoom_levels, min_z, max_z = scan_tiles(
+        tar_path, "tar", timeout_seconds=0
+    )
+
+    assert tile_count < 3000  # should have timed out before finishing
+    assert tile_count >= 0
+
+
+def test_scan_tiles_empty_directory(temp_dir):
+    """Empty directory returns zero counts and empty zoom levels."""
+    tile_count, samples, zoom_levels, min_z, max_z = scan_tiles(temp_dir, "directory")
+
+    assert tile_count == 0
+    assert samples == []
+    assert zoom_levels == []
+
+
+def test_scan_tiles_empty_tar(temp_dir):
+    """Empty tar returns zero counts and empty zoom levels."""
+    tar_path = temp_dir / "tiles.tar"
+    with tarfile.open(tar_path, "w") as tar:
+        pass  # empty archive
+
+    tile_count, samples, zoom_levels, min_z, max_z = scan_tiles(tar_path, "tar")
+
+    assert tile_count == 0
+    assert samples == []
+    assert zoom_levels == []
+
+
+def test_scan_tiles_tar_base_path_with_timeout(temp_dir):
+    """Tar scanning with base_path respects timeout_seconds."""
+    tar_path = temp_dir / "tiles.tar"
+    with tarfile.open(tar_path, "w") as tar:
+        tile_data = b"fake"
+        for z in [5, 10, 15]:
+            for x in range(20):
+                for y in range(50):
+                    tile_info = tarfile.TarInfo(name=f"maps/region/{z}/{x}/{y}.png")
+                    tile_info.size = len(tile_data)
+                    tar.addfile(tile_info, BytesIO(tile_data))
+
+    # With generous timeout, all tiles found via base_path stripping
+    tile_count, samples, zoom_levels, min_z, max_z = scan_tiles(
+        tar_path, "tar", base_path="maps/region", timeout_seconds=60
+    )
+
+    assert tile_count == 3000
+    assert zoom_levels == [5, 10, 15]
+    assert min_z == 5
+    assert max_z == 15
+
+    # With timeout=0, partial count but still works
+    tile_count_partial, _, zoom_partial, _, _ = scan_tiles(
+        tar_path, "tar", base_path="maps/region", timeout_seconds=0
+    )
+
+    assert tile_count_partial < 3000
+    assert tile_count_partial >= 0
+
+
 # ============================================================================
 # find_tile_in_tar_index Tests
 # ============================================================================
