@@ -1,5 +1,6 @@
 """Configuration loading and validation for the tile server."""
 
+import datetime
 import json
 import logging
 import re
@@ -267,8 +268,8 @@ def scan_tiles(
     source_type: str,
     base_path: str = "",
     max_samples: int = 5,
-    timeout_seconds: int = 10,
-) -> Tuple[int, List[str], List[int], int, int]:
+    timeout_seconds: int = 120,
+) -> Tuple[int, List[str], List[int], int, int, bool]:
     """
     Scan tiles from directory or tar archive to collect metadata.
 
@@ -280,10 +281,12 @@ def scan_tiles(
         timeout_seconds: Maximum time to spend scanning (fail-fast).
 
     Returns:
-        Tuple of (tile_count, sample_tiles, zoom_levels_sorted, min_zoom, max_zoom).
+        Tuple of (tile_count, sample_tiles, zoom_levels_sorted, min_zoom, max_zoom, scan_complete).
+        scan_complete is False if the scan was interrupted by the timeout.
     """
     start_time = time.time()
     tile_count = 0
+    timed_out = False
     sample_tiles: List[str] = []
     zoom_levels_found: Set[int] = set()
 
@@ -339,6 +342,7 @@ def scan_tiles(
             with tarfile.open(source_path, "r:*") as tar:
                 for member in tar:
                     if time.time() - start_time > timeout_seconds:
+                        timed_out = True
                         logger.warning(
                             "Scan timeout reached for %s after %d tiles",
                             source_path.name,
@@ -379,7 +383,7 @@ def scan_tiles(
         max_zoom = DEFAULT_MAX_Z
         zoom_levels_sorted = []
 
-    return tile_count, sample_tiles, zoom_levels_sorted, min_zoom, max_zoom
+    return tile_count, sample_tiles, zoom_levels_sorted, min_zoom, max_zoom, not timed_out
 
 
 def scan_all_tilesets(
@@ -409,7 +413,7 @@ def scan_all_tilesets(
         )
 
         try:
-            tile_count, sample_tiles, zoom_levels, min_zoom, max_zoom = scan_tiles(
+            tile_count, sample_tiles, zoom_levels, min_zoom, max_zoom, scan_complete = scan_tiles(
                 source_path=source_path,
                 source_type=source_type,
                 base_path=base_path,
@@ -425,10 +429,12 @@ def scan_all_tilesets(
                 "source_type": source_type,
                 "base_path": base_path,
                 "tile_count": tile_count,
+                "tile_count_complete": scan_complete,
                 "sample_tiles": sample_tiles_with_tileset,
                 "zoom_levels": zoom_levels,
                 "min_zoom": min_zoom,
                 "max_zoom": max_zoom,
+                "scanned_at": datetime.datetime.now().isoformat(),
             }
 
             if zoom_levels:
@@ -453,10 +459,12 @@ def scan_all_tilesets(
                 "source_type": source_type,
                 "base_path": base_path,
                 "tile_count": 0,
+                "tile_count_complete": False,
                 "sample_tiles": [],
                 "zoom_levels": [],
                 "min_zoom": DEFAULT_MIN_Z,
                 "max_zoom": DEFAULT_MAX_Z,
+                "scanned_at": datetime.datetime.now().isoformat(),
                 "error": str(e),
             }
 

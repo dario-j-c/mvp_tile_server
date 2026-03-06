@@ -37,8 +37,8 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument(
         "config",
         nargs="?",
-        default="tilesets.json",
-        help="Path to tileset configuration JSON file (default: tilesets.json).",
+        default="config.json",
+        help="Path to tileset configuration JSON file (default: config.json).",
     )
     parser.add_argument(
         "-p",

@@ -700,7 +700,7 @@ def test_scan_tiles_directory(temp_dir):
             (tile_dir / "0.png").touch()
             (tile_dir / "1.png").touch()
 
-    tile_count, samples, zoom_levels, min_z, max_z = scan_tiles(
+    tile_count, samples, zoom_levels, min_z, max_z, complete = scan_tiles(
         temp_dir, "directory", max_samples=5
     )
 
@@ -709,6 +709,7 @@ def test_scan_tiles_directory(temp_dir):
     assert zoom_levels == [10, 11]
     assert min_z == 10
     assert max_z == 11
+    assert complete is True
 
 
 def test_scan_tiles_tar(temp_dir):
@@ -722,7 +723,7 @@ def test_scan_tiles_tar(temp_dir):
                 tile_info.size = len(tile_data)
                 tar.addfile(tile_info, BytesIO(tile_data))
 
-    tile_count, samples, zoom_levels, min_z, max_z = scan_tiles(
+    tile_count, samples, zoom_levels, min_z, max_z, complete = scan_tiles(
         tar_path, "tar", max_samples=3
     )
 
@@ -731,6 +732,7 @@ def test_scan_tiles_tar(temp_dir):
     assert zoom_levels == [12, 13, 14]
     assert min_z == 12
     assert max_z == 14
+    assert complete is True
 
 
 def test_scan_tiles_tar_with_base_path(temp_dir):
@@ -743,12 +745,13 @@ def test_scan_tiles_tar_with_base_path(temp_dir):
         tile_info.size = len(tile_data)
         tar.addfile(tile_info, BytesIO(tile_data))
 
-    tile_count, samples, zoom_levels, min_z, max_z = scan_tiles(
+    tile_count, samples, zoom_levels, min_z, max_z, complete = scan_tiles(
         tar_path, "tar", base_path="nested/path"
     )
 
     assert tile_count == 1
     assert zoom_levels == [10]
+    assert complete is True
 
 
 def test_scan_tiles_directory_zoom_discovery_survives_timeout(temp_dir):
@@ -761,7 +764,7 @@ def test_scan_tiles_directory_zoom_discovery_survives_timeout(temp_dir):
                 (tile_dir / f"{y}.png").touch()
 
     # timeout_seconds=0 forces phase-2 to time out immediately
-    tile_count, samples, zoom_levels, min_z, max_z = scan_tiles(
+    tile_count, samples, zoom_levels, min_z, max_z, complete = scan_tiles(
         temp_dir, "directory", timeout_seconds=0
     )
 
@@ -769,6 +772,7 @@ def test_scan_tiles_directory_zoom_discovery_survives_timeout(temp_dir):
     assert min_z == 5
     assert max_z == 15
     assert tile_count >= 0
+    assert isinstance(complete, bool)
 
 
 def test_scan_tiles_directory_timeout_logs_warning(temp_dir, caplog):
@@ -783,7 +787,7 @@ def test_scan_tiles_directory_timeout_logs_warning(temp_dir, caplog):
                 (tile_dir / f"{y}.png").touch()
 
     with caplog.at_level(logging.WARNING):
-        _, _, zoom_levels, _, _ = scan_tiles(temp_dir, "directory", timeout_seconds=0)
+        _, _, zoom_levels, _, _, _ = scan_tiles(temp_dir, "directory", timeout_seconds=0)
 
     assert set(zoom_levels) == {1, 2}
     assert any("timeout" in r.message.lower() for r in caplog.records)
@@ -798,7 +802,7 @@ def test_scan_tiles_directory_no_timeout_counts_all(temp_dir):
             (tile_dir / "0.png").touch()
             (tile_dir / "1.png").touch()
 
-    tile_count, samples, zoom_levels, min_z, max_z = scan_tiles(
+    tile_count, samples, zoom_levels, min_z, max_z, complete = scan_tiles(
         temp_dir, "directory", max_samples=5, timeout_seconds=60
     )
 
@@ -807,6 +811,7 @@ def test_scan_tiles_directory_no_timeout_counts_all(temp_dir):
     assert min_z == 10
     assert max_z == 11
     assert len(samples) <= 5
+    assert complete is True
 
 
 def test_scan_tiles_directory_max_samples_caps(temp_dir):
@@ -819,13 +824,14 @@ def test_scan_tiles_directory_max_samples_caps(temp_dir):
                 (tile_dir / f"{y}.png").touch()
 
     # 50 tiles total, cap at 3
-    tile_count, samples, zoom_levels, min_z, max_z = scan_tiles(
+    tile_count, samples, zoom_levels, min_z, max_z, complete = scan_tiles(
         temp_dir, "directory", max_samples=3, timeout_seconds=60
     )
 
     assert tile_count == 50
     assert len(samples) == 3
     assert zoom_levels == [10]
+    assert complete is True
 
 
 def test_scan_tiles_tar_max_samples_caps(temp_dir):
@@ -841,13 +847,14 @@ def test_scan_tiles_tar_max_samples_caps(temp_dir):
                     tar.addfile(tile_info, BytesIO(tile_data))
 
     # 50 tiles total, cap at 2
-    tile_count, samples, zoom_levels, min_z, max_z = scan_tiles(
+    tile_count, samples, zoom_levels, min_z, max_z, complete = scan_tiles(
         tar_path, "tar", max_samples=2, timeout_seconds=60
     )
 
     assert tile_count == 50
     assert len(samples) == 2
     assert zoom_levels == [10]
+    assert complete is True
 
 
 def test_scan_tiles_tar_timeout(temp_dir):
@@ -863,21 +870,23 @@ def test_scan_tiles_tar_timeout(temp_dir):
                     tar.addfile(tile_info, BytesIO(tile_data))
 
     # 3000 tiles total, timeout=0 should produce a partial count
-    tile_count, samples, zoom_levels, min_z, max_z = scan_tiles(
+    tile_count, samples, zoom_levels, min_z, max_z, complete = scan_tiles(
         tar_path, "tar", timeout_seconds=0
     )
 
     assert tile_count < 3000  # should have timed out before finishing
     assert tile_count >= 0
+    assert complete is False
 
 
 def test_scan_tiles_empty_directory(temp_dir):
     """Empty directory returns zero counts and empty zoom levels."""
-    tile_count, samples, zoom_levels, min_z, max_z = scan_tiles(temp_dir, "directory")
+    tile_count, samples, zoom_levels, min_z, max_z, complete = scan_tiles(temp_dir, "directory")
 
     assert tile_count == 0
     assert samples == []
     assert zoom_levels == []
+    assert complete is True
 
 
 def test_scan_tiles_empty_tar(temp_dir):
@@ -886,11 +895,12 @@ def test_scan_tiles_empty_tar(temp_dir):
     with tarfile.open(tar_path, "w") as tar:
         pass  # empty archive
 
-    tile_count, samples, zoom_levels, min_z, max_z = scan_tiles(tar_path, "tar")
+    tile_count, samples, zoom_levels, min_z, max_z, complete = scan_tiles(tar_path, "tar")
 
     assert tile_count == 0
     assert samples == []
     assert zoom_levels == []
+    assert complete is True
 
 
 def test_scan_tiles_tar_base_path_with_timeout(temp_dir):
@@ -906,7 +916,7 @@ def test_scan_tiles_tar_base_path_with_timeout(temp_dir):
                     tar.addfile(tile_info, BytesIO(tile_data))
 
     # With generous timeout, all tiles found via base_path stripping
-    tile_count, samples, zoom_levels, min_z, max_z = scan_tiles(
+    tile_count, samples, zoom_levels, min_z, max_z, complete = scan_tiles(
         tar_path, "tar", base_path="maps/region", timeout_seconds=60
     )
 
@@ -914,14 +924,16 @@ def test_scan_tiles_tar_base_path_with_timeout(temp_dir):
     assert zoom_levels == [5, 10, 15]
     assert min_z == 5
     assert max_z == 15
+    assert complete is True
 
     # With timeout=0, partial count but still works
-    tile_count_partial, _, zoom_partial, _, _ = scan_tiles(
+    tile_count_partial, _, zoom_partial, _, _, complete_partial = scan_tiles(
         tar_path, "tar", base_path="maps/region", timeout_seconds=0
     )
 
     assert tile_count_partial < 3000
     assert tile_count_partial >= 0
+    assert complete_partial is False
 
 
 # ============================================================================

@@ -17,6 +17,7 @@ Usage:
 """
 
 import asyncio
+import datetime
 import email.utils
 import json
 import logging
@@ -35,6 +36,7 @@ from app.config import (
     DEFAULT_MIN_Z,
     load_tileset_config,
     scan_all_tilesets,
+    scan_tiles,
 )
 from app.exceptions import (
     InvalidCoordinateError,
@@ -136,10 +138,12 @@ def create_app(
                     "source_type": tileset_info["source_type"],
                     "base_path": tileset_info.get("base_path", ""),
                     "tile_count": 0,
+                    "tile_count_complete": True,
                     "sample_tiles": [],
                     "zoom_levels": [],
                     "min_zoom": DEFAULT_MIN_Z,
                     "max_zoom": DEFAULT_MAX_Z,
+                    "scanned_at": None,
                 }
 
         app.state.tilesets = tilesets
@@ -213,8 +217,10 @@ def create_app(
                 "source_type": metadata["source_type"],
                 "source_path": metadata["source_path"],
                 "tile_count": metadata["tile_count"],
+                "tile_count_complete": metadata.get("tile_count_complete", True),
                 "zoom_levels": metadata["zoom_levels"],
                 "sample_tiles": metadata["sample_tiles"][:3],
+                "scanned_at": metadata.get("scanned_at"),
             }
             total_tiles += metadata["tile_count"]
 
@@ -262,12 +268,14 @@ def create_app(
             "source_type": metadata["source_type"],
             "source_path": metadata["source_path"],
             "tile_count": f"{metadata['tile_count']:,}",
+            "tile_count_complete": metadata.get("tile_count_complete", True),
             "zoom_levels": metadata["zoom_levels"],
             "zoom_range": f"{metadata['min_zoom']}-{metadata['max_zoom']}"
             if metadata["zoom_levels"]
             else "unknown",
             "sample_tiles": metadata["sample_tiles"],
             "tile_url_format": f"/{tileset_name}/{{z}}/{{x}}/{{y.ext}}",
+            "scanned_at": metadata.get("scanned_at"),
         }
 
         # Add tar-specific info
@@ -324,6 +332,61 @@ def create_app(
                 status_code=500,
                 detail=f"Failed to rebuild index: {str(e)}",
             )
+
+    @app.post(
+        "/admin/rescan/{tileset_name}",
+        summary="Re-scan tile metadata for a tileset (picks up directory changes)",
+    )
+    async def rescan_tileset(tileset_name: str, request: Request):
+        """
+        Re-scan tile metadata (tile count, zoom levels) for a tileset.
+
+        Useful after swapping a directory tileset (e.g. renaming map_tiles to
+        map_tiles_bkup and replacing it with a new map_tiles). Without a rescan
+        the server retains the zoom bounds from the original startup scan, which
+        can cause tile requests to be rejected or the tile count to be stale.
+        """
+        if tileset_name not in request.app.state.tilesets:
+            available = list(request.app.state.tilesets.keys())
+            raise TilesetNotFoundError(tileset_name, available)
+
+        tileset_info = request.app.state.tilesets[tileset_name]
+        source_path: Path = tileset_info["source_path"]
+        source_type: str = tileset_info["source_type"]
+        base_path: str = tileset_info.get("base_path", "")
+
+        try:
+            tile_count, sample_tiles, zoom_levels, min_zoom, max_zoom, scan_complete = await asyncio.to_thread(
+                scan_tiles,
+                source_path=source_path,
+                source_type=source_type,
+                base_path=base_path,
+            )
+        except Exception as e:
+            logger.error("Error rescanning tileset '%s': %s", tileset_name, e)
+            raise HTTPException(status_code=500, detail=f"Rescan failed: {str(e)}")
+
+        sample_tiles_with_tileset = [f"/{tileset_name}/{t}" for t in sample_tiles]
+        scanned_at = datetime.datetime.now().isoformat()
+
+        request.app.state.tileset_metadata[tileset_name].update({
+            "tile_count": tile_count,
+            "tile_count_complete": scan_complete,
+            "sample_tiles": sample_tiles_with_tileset,
+            "zoom_levels": zoom_levels,
+            "min_zoom": min_zoom,
+            "max_zoom": max_zoom,
+            "scanned_at": scanned_at,
+        })
+
+        return {
+            "status": "success",
+            "tileset": tileset_name,
+            "tile_count": tile_count,
+            "tile_count_complete": scan_complete,
+            "zoom_levels": zoom_levels,
+            "scanned_at": scanned_at,
+        }
 
     @app.get(
         "/admin/status/{tileset_name}",
@@ -513,7 +576,7 @@ def get_app() -> FastAPI:
     Returns:
         Configured FastAPI application instance.
     """
-    config_path = os.getenv("CONFIG_PATH", "tilesets.json")
+    config_path = os.getenv("CONFIG_PATH", "config.json")
     do_scan = os.getenv("TILE_SCAN", "1") != "0"
     metadata_file = os.getenv("TILE_METADATA_FILE")
     return create_app(config_path, do_scan=do_scan, metadata_file=metadata_file)
