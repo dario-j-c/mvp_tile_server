@@ -252,6 +252,72 @@ def test_no_304_with_wrong_etag(client):
 
 
 # ============================================================================
+# Rescan Endpoint Tests
+# ============================================================================
+
+
+def test_admin_rescan_directory_tileset(client):
+    """Test POST /admin/rescan/{name} succeeds for a directory tileset."""
+    response = client.post("/admin/rescan/test_directory")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "success"
+    assert data["tileset"] == "test_directory"
+    assert "tile_count" in data
+    assert "zoom_levels" in data
+    assert "scanned_at" in data
+    assert isinstance(data["zoom_levels"], list)
+
+
+def test_admin_rescan_tar_tileset(client):
+    """Test POST /admin/rescan/{name} succeeds for a tar tileset."""
+    response = client.post("/admin/rescan/test_tar_uncompressed")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "success"
+    assert data["tileset"] == "test_tar_uncompressed"
+    assert "tile_count" in data
+    assert "zoom_levels" in data
+    assert isinstance(data["zoom_levels"], list)
+
+
+def test_admin_rescan_nonexistent_tileset(client):
+    """Test POST /admin/rescan/{name} returns 404 for unknown tileset."""
+    response = client.post("/admin/rescan/nonexistent")
+    assert response.status_code == 404
+
+
+def test_admin_rescan_tar_reads_from_index(client):
+    """Tar rescan derives metadata from the in-memory index, not the file."""
+    # The admin status endpoint reflects the current index state
+    status = client.get("/admin/status/test_tar_uncompressed").json()
+
+    response = client.post("/admin/rescan/test_tar_uncompressed")
+    assert response.status_code == 200
+    data = response.json()
+
+    # Rescan should agree with the index on zoom levels and completeness
+    assert data["zoom_levels"] == status["zoom_levels"]
+    assert data["tile_count_complete"] is True
+
+
+def test_admin_rescan_updates_metadata(client):
+    """Test that rescan actually refreshes the metadata stored in app state."""
+    # Capture state before rescan
+    before = client.get("/tilesets/test_directory").json()
+
+    # Perform rescan
+    rescan_resp = client.post("/admin/rescan/test_directory")
+    assert rescan_resp.status_code == 200
+    rescan_data = rescan_resp.json()
+
+    # Metadata endpoint should reflect the rescanned zoom levels
+    after = client.get("/tilesets/test_directory").json()
+    assert after["zoom_levels"] == rescan_data["zoom_levels"]
+    assert after["scanned_at"] == rescan_data["scanned_at"]
+
+
+# ============================================================================
 # App Configuration Tests
 # ============================================================================
 
