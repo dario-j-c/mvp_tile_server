@@ -1,421 +1,161 @@
 # MVP Tile Server
 
-A high-performance FastAPI tile server supporting multiple tilesets from directories and tar archives.
+A high-performance FastAPI tile server for serving multiple tilesets from directory trees or tar archives, optimised for local event deployments.
 
 ## Overview
 
-This is an MVP tile server designed to serve multiple tile sets locally. It supports:
+Designed to serve tiles to looping displays and interactive maps at events where the server runs locally and restarts are disruptive. Supports multiple independent tilesets, configurable at runtime without code changes.
 
-- **Directories** - Traditional file system folders
-- **Tar Archives** - Uncompressed or compressed tar files (no extraction required)
+**Tile sources:**
+- **Directories** — standard `z/x/y.ext` filesystem layout
+- **Tar archives** — uncompressed `.tar` (recommended) or compressed `.tar.gz / .tar.bz2 / .tar.xz`; tiles are streamed directly without extraction
 
-In the future, other formats may be supported (MBTiles, Cloud Optimised GeoTiffs), but this serves the immediate need.
+**Detailed docs:**
+- [Usage & API Reference](docs/usage.md) — all CLI options, every endpoint, request/response format
+- [Troubleshooting](docs/troubleshooting.md) — startup failures, tar issues, tile errors, performance
+- [Developer Guide](docs/dev-guide.md) — codebase walkthrough, how to add features, where bugs hide
 
-## Key Features
-
-- Multiple tileset support with independent configurations
-- Serve tiles directly from tar archives without extraction
-- Auto-detection of tile structure within tar files
-- Support for uncompressed (.tar) and compressed (.tar.gz, .tar.bz2, .tar.xz) formats
-- Admin endpoints for tar index management
-- Fast(ish) tar inspection utility for configuration assistance
+---
 
 ## Installation
 
 ```bash
-# Using uv (recommended)
 uv sync
 ```
 
-## Usage
+---
 
-Run the tile server with a configuration file:
+## Quick Start
 
-```bash
-# Using the app module (recommended)
-python -m app [config_file] -p [port] -b [address]
+**1. Create a config file:**
 
-# Or using uv
-uv run python -m app [config_file] -p [port] -b [address]
+```json
+{
+  "tilesets": {
+    "osm": "/path/to/osm/tiles",
+    "satellite": "/path/to/satellite.tar"
+  }
+}
 ```
 
-**Options:**
-- `config_file` - Path to configuration JSON (default: `tilesets.json`)
-- `-p, --port` - Port to bind (default: `8000`)
-- `-b, --bind` - Address to bind (default: `0.0.0.0`)
-- `-w, --workers` - Number of uvicorn workers (default: `4`)
-- `--no-scan` - Skip initial tile scanning for faster startup
-- `--reload` - Enable auto-reload for development
+**2. Start the server:**
+
+```bash
+uv run python -m app config.json
+```
+
+**3. Verify:**
+
+```
+GET http://localhost:8000/health
+GET http://localhost:8000/
+```
+
+Tiles are served at `/{tileset_name}/{z}/{x}/{y.ext}`.
+
+---
+
+## Configuration
+
+Config is a JSON file with a `tilesets` dict. Each entry is either a path string or a dict with `source` and optional `base_path`.
+
+```json
+{
+  "tilesets": {
+    "osm":       "/data/osm_tiles",
+    "satellite": "/data/sat.tar",
+    "topo": {
+      "source":    "/data/topo.tar",
+      "base_path": "tiles"
+    }
+  }
+}
+```
+
+**Tileset name rules:** alphanumeric, hyphens and underscores allowed, cannot start with a digit.
+
+**Tar `base_path`:** the path inside the archive where `z/x/y.ext` tiles begin. Omit it and the server auto-detects. Use `python inspect_tar.py /path/to/archive.tar` to inspect an archive before configuring it.
+
+See `config/config_example.json` for a documented template.
+
+---
 
 ## Project Structure
 
 ```
 mvp_tile_server/
-├── app/                    # Main application package
-│   ├── __init__.py         # Package exports
-│   ├── __main__.py         # CLI entry point
-│   ├── config.py           # Configuration loading and validation
-│   ├── exceptions.py       # Custom exception classes
-│   ├── main.py             # FastAPI application and routes
-│   ├── tar_manager.py      # Tar archive handling
-│   └── utils.py            # Utility functions
-├── config/                 # Configuration files
-│   ├── config.json         # Active configuration (edit for Docker)
-│   └── config_example.json # Documented example with comments
-├── env/                    # Environment files
-│   ├── .env.example        # Environment variables template
-│   └── .env                # Your environment settings (git-ignored)
-├── tests/                  # Test suite
-│   ├── conftest.py         # Pytest fixtures and test setup
-│   ├── test_integration.py # API endpoint tests
-│   ├── test_unit.py        # Unit tests
-│   └── test_property.py    # Property-based tests
-├── docker-compose.yml      # Docker Compose configuration
-├── Dockerfile              # Container build instructions
-└── inspect_tar.py          # Tar inspection utility
+├── app/
+│   ├── __main__.py         # CLI entry point (python -m app)
+│   ├── main.py             # FastAPI app, routes, lifespan
+│   ├── config.py           # Config loading, validation, directory scanning
+│   ├── tar_manager.py      # Tar index management and tile extraction
+│   ├── exceptions.py       # Custom exception classes and HTTP codes
+│   └── utils.py            # Shared utilities (path parsing, media types)
+├── config/
+│   ├── config.json         # Active config (edit for your deployment)
+│   └── config_example.json # Documented template
+├── env/
+│   ├── .env.example        # Environment variable template
+│   └── .env                # Your settings (git-ignored)
+├── docs/
+│   ├── usage.md            # Full CLI and API reference
+│   └── troubleshooting.md  # Diagnosis and fixes
+├── tests/
+│   ├── conftest.py
+│   ├── test_integration.py
+│   ├── test_unit.py
+│   └── test_property.py
+├── docker-compose.yml
+├── Dockerfile
+└── inspect_tar.py          # Tar structure inspection utility
 ```
 
-## Configuration File
+---
 
-Create a JSON file defining your tilesets. The server supports both **directory** and **tar archive** sources.
-
-### Directory-Based Configuration
-```json
-{
-  "tilesets": {
-    "osm": "/path/to/osm/tiles",
-    "satellite": "/path/to/satellite/tiles",
-    "topo": "./topographic_tiles"
-  }
-}
-```
-
-### Tar Archive Configuration
-
-#### Simple (Auto-Detect Structure)
-```json
-{
-  "tilesets": {
-    "osm": "/path/to/osm_tiles.tar",
-    "satellite": "/path/to/satellite.tar.gz"
-  }
-}
-```
-
-#### Explicit Base Path (For Nested Structures)
-```json
-{
-  "tilesets": {
-    "topo": {
-      "source": "/path/to/topo.tar",
-      "base_path": "tiles"
-    },
-    "aerial": {
-      "source": "/path/to/aerial.tar.gz",
-      "base_path": "data/map_tiles"
-    }
-  }
-}
-```
-
-### Mixed Configuration (Both Types)
-```json
-{
-  "tilesets": {
-    "osm": "/path/to/osm/tiles",
-    "satellite": "/path/to/satellite.tar",
-    "topo": {
-      "source": "/path/to/topo.tar.gz",
-      "base_path": "tiles"
-    }
-  }
-}
-```
-
-**Requirements:**
-
-- Tileset names must be alphanumeric with hyphens/underscores, cannot start with a digit
-- Paths must exist (directories or tar files)
-- Each source must contain the standard `{z}/{x}/{y.ext}` structure
-- For tar files, tiles can be at root or in a subdirectory (specify with `base_path`)
-
-## API Endpoints
-
-### Tile Endpoints
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /tiles/{tileset}/{z}/{x}/{y.ext}` | Retrieve a tile |
-
-### Information Endpoints
-
-| Endpoint | Description |
-|----------|-------------|
-| `GET /` | Server status and tileset overview |
-| `GET /tilesets/{tileset_name}` | Detailed tileset information |
-| `GET /health` | Health check |
-
-### Admin Endpoints (Tar Archives)
-
-| Endpoint | Description |
-|----------|-------------|
-| `POST /admin/rebuild/{tileset_name}` | Rebuild tar index |
-| `GET /admin/status/{tileset_name}` | Get tar index status |
-
-## Inspecting Tar Archives
-
-Before configuring tar archives, use the inspection utility to understand the structure:
+## Running the Tests
 
 ```bash
-python inspect_tar.py /path/to/your/tiles.tar
-```
-
-**Options:**
-- `--timeout 120` - Set inspection timeout in seconds (default: 60)
-- `--max-members 5000` - Maximum archive members to scan (default: 1000)
-
-**Example Output:**
-```
-TAR ARCHIVE INSPECTION RESULTS
-======================================================================
-
-File: /path/to/tiles.tar
-Compression: uncompressed
-Size: 2.3 GB
-Members scanned: 1000
-Scan time: 2.45s
-
-----------------------------------------------------------------------
-TILE DETECTION
-----------------------------------------------------------------------
-
-Found tiles matching {z}/{x}/{y.ext} pattern!
-  Zoom levels detected: [10, 11, 12, 13]
-  File extensions: ['.png', '.webp']
-
-----------------------------------------------------------------------
-RECOMMENDED CONFIGURATION
-----------------------------------------------------------------------
-
-Detected base path: 'tiles'
-
-Add to your tilesets.json:
-
-{
-  "tilesets": {
-    "your_tileset_name": {
-      "source": "/path/to/tiles.tar",
-      "base_path": "tiles"
-    }
-  }
-}
-```
-
-## File Structure
-
-### Directory Structure
-Each tileset directory should follow the standard tile layout:
-
-```
-tileset_directory/
-├── 1/
-│   └── 0/
-│       └── 0.png
-├── 2/
-│   ├── 0/
-│   └── 1/
-└── ...
-```
-
-### Tar Archive Structure
-Tar archives must contain the same `{z}/{x}/{y.ext}` structure:
-
-**Root-level tiles:**
-```
-tiles.tar
-├── 10/
-│   └── 512/
-│       └── 256.png
-├── 11/
-│   └── 1024/
-│       └── 512.png
-└── ...
-```
-
-**Nested tiles (requires base_path):**
-```
-tiles.tar
-├── README.txt
-├── metadata/
-│   └── info.json
-└── tiles/              # <- This is your base_path
-    ├── 10/
-    │   └── 512/
-    │       └── 256.png
-    └── ...
-```
-
-**Note:** The server accommodates **one large tar file per tileset**. Do not split tiles across multiple tar files for a single tileset.
-
-## Testing
-
-Run the test suite:
-
-```bash
-# Run all tests
 uv run pytest tests/ -v
 ```
 
-The test suite includes:
-- **Integration tests** - API endpoint testing with TestClient
-- **Unit tests** - Individual function and class testing
-- **Property-based tests** - Hypothesis-powered fuzzing
-
-## Error Handling
-
-The server validates all tileset configurations on startup and displays comprehensive error messages if paths don't exist or names are invalid.
-
-**Error Response Format:**
-```json
-{
-  "error": "tile_not_found",
-  "message": "Tile not found at coordinates",
-  "tileset": "osm",
-  "z": 10,
-  "x": 512,
-  "y": 256,
-  "extensions_tried": [".png", ".jpg", ".webp", ".pbf"]
-}
-```
-
-## Performance Considerations
-
-### Tar Archive Performance
-
-The server serves tiles **directly from tar archives without extraction**, streaming tile data on demand.
-
-**Recommendations:**
-- **Uncompressed `.tar` files are strongly recommended** for production
-- Compressed formats require CPU-intensive decompression per tile request
-- The server warns on startup when using compressed tar files
-- Startup time: Building tar indexes takes ~10-50ms per archive (one-time per worker)
-
-### When to Use Tar Archives
-
-**Use tar archives when:**
-- Disk space is limited
-- Filesystem has inode limits (tar = 1 file instead of thousands)
-- Read-only environment where extraction is not possible
-- Simplifying deployment (single file instead of directory tree)
-
-**Use directories when:**
-- Maximum performance is critical
-- Tiles need frequent updates
-
-### Optimization Tips
-
-1. **Use directories when possible** - Direct file access is fastest
-2. **Use uncompressed tar files** when tar is needed (disk space, inode limits)
-3. **Disable startup scan** with `--no-scan` flag for faster boot
-4. **Use multiple workers** (`--workers 8`) to handle concurrent requests
-
-If you need to use tar archives, create them uncompressed:
-```bash
-# Create uncompressed tar (recommended)
-tar -cf tiles.tar -C /source/path .
-
-# Avoid compression - it's slower per request
-# tar -czf tiles.tar.gz -C /source/path .
-```
+---
 
 ## Docker
-
-The server can be run with Docker for containerized deployments.
-
-### Quick Start with Docker Compose
 
 ```bash
 # 1. Copy and configure environment
 cp env/.env.example env/.env
 
-# 2. Edit config/config.json to define your tilesets
+# 2. Edit config/config.json with your tileset paths (use /app/data/... container paths)
 
-# 3. Start the server
+# 3. Start
 docker-compose --env-file env/.env up
 ```
 
-Note: The `--env-file` flag is required because Docker Compose only reads `.env` from the project root by default. Using the flag explicitly points to our `env/` folder location.
-
-### Configuration Files
-
-```
-config/
-  config.json         # Your tileset configuration (edit this)
-  config_example.json # Documented template with examples
-env/
-  .env.example        # Environment template
-  .env                # Your environment settings (copy from .env.example)
-```
-
-Note: The `env/.env` file is git-ignored as it may contain environment-specific settings.
-
-### Environment Variables
-
-Copy `env/.env.example` to `env/.env` and customize:
-
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `TILE_SERVER_PORT` | `8000` | Host port mapping |
-| `TILE_DATA_PATH` | `./test_data` | Host path to tile data |
-| `LOG_LEVEL` | `info` | Logging verbosity (debug, info, warning, error) |
+|---|---|---|
+| `TILE_SERVER_PORT` | `8000` | Host port |
+| `TILE_DATA_PATH` | `./test_data` | Host path mounted at `/app/data/` |
+| `LOG_LEVEL` | `info` | `debug`, `info`, `warning`, `error` |
 
-### Docker Configuration
+The container expects your config at `/app/config.json` (mapped from `config/config.json`) and tile data under `/app/data/` (mapped from `TILE_DATA_PATH`).
 
-The container expects:
-- **Config file** mounted at `/app/config.json` (from `config/config.json`)
-- **Tile data** mounted under `/app/data/` (from `TILE_DATA_PATH`)
+---
 
-Edit `config/config.json` to define your tilesets. This file should reference container paths (`/app/data/...`). See `config/config_example.json` for a documented template.
+## Tar Archive Recommendations
 
-Example `config/config.json`:
-
-```json
-{
-  "tilesets": {
-    "osm": "/app/data/osm",
-    "satellite": "/app/data/satellite.tar"
-  }
-}
-```
-
-### Building the Image
+**Use uncompressed `.tar` files.** Compressed formats require sequential decompression per request and will be significantly slower. The server warns on startup when compressed archives are loaded.
 
 ```bash
-docker build -t tile-server .
+# Create uncompressed (recommended)
+tar -cf tiles.tar -C /source/dir .
+
+# Not recommended — slower per request
+tar -czf tiles.tar.gz -C /source/dir .
 ```
 
-### Running with Docker (without Compose)
-
-```bash
-docker run -d \
-  -p 8000:8000 \
-  -v /path/to/tiles:/app/data:ro \
-  -v $(pwd)/config/config.json:/app/config.json:ro \
-  tile-server
-```
-
-### Production Example
-
-```yaml
-# docker-compose.override.yml
-services:
-  tile-server:
-    volumes:
-      - ./config/config.json:/app/config.json:ro
-      - /data/tiles:/app/data:ro
-    restart: always
-```
+---
 
 ## License
 
-MIT
+TBD (I'll figure this out later.)
