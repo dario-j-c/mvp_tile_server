@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import shutil
@@ -29,6 +30,7 @@ from app.utils import (
     find_tile_path,
     is_tar_file,
     media_type_for_suffix,
+    parse_tile_member_path,
 )
 
 # Note: _find_tile_in_tar_index is tested via TarManager
@@ -124,6 +126,31 @@ def tile_dir(temp_dir):
     return temp_dir
 
 
+def test_parse_tile_member_path_root():
+    """Root-level tile path returns correct tuple."""
+    assert parse_tile_member_path("10/5/3.png") == ("10", "5", "3.png")
+
+
+def test_parse_tile_member_path_nested():
+    """Nested path uses last three components."""
+    assert parse_tile_member_path("tiles/data/10/5/3.png") == ("10", "5", "3.png")
+
+
+def test_parse_tile_member_path_non_digit_z():
+    """Non-digit zoom component returns None."""
+    assert parse_tile_member_path("abc/5/3.png") is None
+
+
+def test_parse_tile_member_path_too_short():
+    """Path with fewer than 3 components returns None."""
+    assert parse_tile_member_path("10/3.png") is None
+
+
+def test_parse_tile_member_path_non_digit_x():
+    """Non-digit x component returns None."""
+    assert parse_tile_member_path("10/abc/3.png") is None
+
+
 def test_find_existing_tile(tile_dir):
     """Test finding a tile that exists"""
     tile_path, _ = find_tile_path(tile_dir, 10, 5, "3.png")
@@ -210,7 +237,7 @@ def tar_file(temp_dir):
 
 def test_build_tar_index(tar_file):
     """Test building index from tar archive"""
-    member_index, zoom_levels = build_tar_index(tar_file)
+    member_index, zoom_levels, sample_tiles = build_tar_index(tar_file)
 
     # Should have 8 tiles (2 zooms * 2 x * 2 y)
     assert len(member_index) == 8
@@ -221,6 +248,11 @@ def test_build_tar_index(tar_file):
     # Check specific tile exists
     assert "10/0/0.png" in member_index
     assert "11/1/1.png" in member_index
+
+    # Sample tiles should be populated (up to _MAX_SAMPLE_TILES)
+    assert isinstance(sample_tiles, list)
+    assert 1 <= len(sample_tiles) <= 5
+    assert all(s in member_index for s in sample_tiles)
 
 
 def test_build_tar_index_with_base_path(temp_dir):
@@ -237,11 +269,12 @@ def test_build_tar_index_with_base_path(temp_dir):
         tile_info.size = len(tile_data)
         tar.addfile(tile_info, BytesIO(tile_data))
 
-    member_index, zoom_levels = build_tar_index(tar_nested, base_path="tiles")
+    member_index, zoom_levels, sample_tiles = build_tar_index(tar_nested, base_path="tiles")
 
     # Should find the tile with normalized path
     assert "10/0/0.png" in member_index
     assert zoom_levels == {10}
+    assert sample_tiles == ["10/0/0.png"]
 
 
 @pytest.mark.asyncio
@@ -595,7 +628,6 @@ def test_load_compressed_tar_logs_warning(temp_dir, caplog):
 @pytest.mark.asyncio
 async def test_tar_manager_initialize_and_close(temp_dir):
     """Test TarManager initialization and cleanup."""
-    # Create tar file
     tar_path = temp_dir / "test.tar"
     with tarfile.open(tar_path, "w") as tar:
         tile_data = b"fake tile"
@@ -604,17 +636,17 @@ async def test_tar_manager_initialize_and_close(temp_dir):
         tar.addfile(tile_info, BytesIO(tile_data))
 
     tar_manager = TarManager()
-    await tar_manager.initialize_tileset("test", tar_path)
+    tile_count, sample_tiles, zoom_levels = await tar_manager.initialize_tileset("test", tar_path)
 
-    # Check status
-    assert "test" in tar_manager.index_status
+    assert tile_count == 1
+    assert sample_tiles == ["10/0/0.png"]
+    assert zoom_levels == [10]
+
     assert tar_manager.index_status["test"]["status"] == "ready"
     assert tar_manager.index_status["test"]["tile_count"] == 1
 
-    # Clean up
+    # close_all is a no-op (no shared handles kept)
     await tar_manager.close_all()
-
-    # Handles should be closed (we can't easily verify this, but no error is good)
 
 
 @pytest.mark.asyncio
@@ -683,6 +715,51 @@ async def test_tar_manager_extension_probing(temp_dir):
     assert media_type == "image/jpeg"
 
     await tar_manager.close_all()
+
+
+@pytest.mark.asyncio
+async def test_tar_manager_no_shared_handle(temp_dir):
+    """TarManager holds no shared tar handle — only an index and a source path."""
+    tar_path = temp_dir / "test.tar"
+    with tarfile.open(tar_path, "w") as tar:
+        tile_data = b"fake tile"
+        tile_info = tarfile.TarInfo(name="10/0/0.png")
+        tile_info.size = len(tile_data)
+        tar.addfile(tile_info, BytesIO(tile_data))
+
+    tar_manager = TarManager()
+    await tar_manager.initialize_tileset("test", tar_path)
+
+    assert not hasattr(tar_manager, "tar_handles")
+    assert not hasattr(tar_manager, "tileset_locks")
+    assert "test" in tar_manager.source_paths
+    assert tar_manager.source_paths["test"] == tar_path
+
+
+@pytest.mark.asyncio
+async def test_tar_manager_concurrent_extraction(temp_dir):
+    """Multiple concurrent extractions work correctly with no shared handle."""
+    tar_path = temp_dir / "test.tar"
+    tile_bytes = {f"10/{i}/0.png": f"tile-{i}".encode() for i in range(10)}
+    with tarfile.open(tar_path, "w") as tar:
+        for name, data in tile_bytes.items():
+            info = tarfile.TarInfo(name=name)
+            info.size = len(data)
+            tar.addfile(info, BytesIO(data))
+
+    tar_manager = TarManager()
+    await tar_manager.initialize_tileset("test", tar_path)
+
+    # Fire all tile requests concurrently
+    tasks = [
+        tar_manager.get_tile_from_tar("test", 10, i, "0.png")
+        for i in range(10)
+    ]
+    results = await asyncio.gather(*tasks)
+
+    for i, (tile_data, media_type, _) in enumerate(results):
+        assert tile_data == f"tile-{i}".encode()
+        assert media_type == "image/png"
 
 
 # ============================================================================
