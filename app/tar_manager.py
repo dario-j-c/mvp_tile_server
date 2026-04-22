@@ -1,12 +1,13 @@
-"""Tar archive index management and concurrent tile extraction."""
+"""Tar archive index management and mmap-based tile extraction."""
 
 import asyncio
 import datetime
 import email.utils
 import logging
+import mmap
 import tarfile
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import IO, Any, Dict, List, Optional, Set, Tuple
 
 from app.exceptions import (
     TarIndexUnavailableError,
@@ -14,7 +15,7 @@ from app.exceptions import (
     TileNotFoundError,
 )
 from app.utils import (
-    detect_tar_compression,
+    TileEntry,
     find_tile_in_tar_index,
     media_type_for_suffix,
     parse_tile_member_path,
@@ -27,7 +28,7 @@ _MAX_SAMPLE_TILES = 5
 
 def build_tar_index(
     tar_path: Path, base_path: str = ""
-) -> Tuple[Dict[str, tarfile.TarInfo], Set[int], List[str]]:
+) -> Tuple[Dict[str, TileEntry], Set[int], List[str]]:
     """
     Build an index of tile members in a tar archive for fast lookup.
 
@@ -37,11 +38,11 @@ def build_tar_index(
 
     Returns:
         Tuple of (member_index, zoom_levels, sample_tiles).
-        member_index maps "z/x/y.ext" -> TarInfo (which stores the byte offset).
+        member_index maps "z/x/y.ext" -> TileEntry (offset, size, mtime, suffix).
         zoom_levels is the set of integer zoom levels found.
         sample_tiles is up to _MAX_SAMPLE_TILES representative paths.
     """
-    member_index: Dict[str, tarfile.TarInfo] = {}
+    member_index: Dict[str, TileEntry] = {}
     zoom_levels: Set[int] = set()
     sample_tiles: List[str] = []
 
@@ -63,7 +64,12 @@ def build_tar_index(
                     z_str, x_str, y_name = parsed
                     zoom_levels.add(int(z_str))
                     tile_key = f"{z_str}/{x_str}/{y_name}"
-                    member_index[tile_key] = member
+                    member_index[tile_key] = TileEntry(
+                        offset=member.offset_data,
+                        size=member.size,
+                        mtime=member.mtime,
+                        suffix=Path(member.name).suffix.lower(),
+                    )
                     if len(sample_tiles) < _MAX_SAMPLE_TILES:
                         sample_tiles.append(tile_key)
 
@@ -83,24 +89,24 @@ def build_tar_index(
 
 class TarManager:
     """
-    Manager for tar file indexes with concurrent per-request tile extraction.
+    Manager for tar file indexes with mmap-based tile extraction.
 
-    Each tile extraction opens a fresh file descriptor, seeks to TarInfo.offset_data
-    (the absolute byte position stored during indexing), reads the tile, and closes.
-    No shared handle is kept, so extractions run fully concurrently in the thread pool.
+    On initialization each tileset's tar file is memory-mapped (one file descriptor
+    per tileset per worker). Tile reads are synchronous slices of the mmap — O(1)
+    seek, no per-request FD open/close, no thread pool required.
 
     Attributes:
         rebuild_lock: Prevents concurrent index rebuilds.
-        tar_indexes: Pre-built indexes mapping tile paths to TarInfo objects.
-        source_paths: Path to each tileset's tar file, used for per-request opens.
+        tar_indexes: Pre-built indexes mapping tile paths to TileEntry objects.
+        mmaps: Memory-mapped views of each tileset's tar file.
         index_status: Tracks index state per tileset (ready, rebuilding, error).
     """
 
     def __init__(self) -> None:
         self.rebuild_lock: asyncio.Lock = asyncio.Lock()
-        self.tar_indexes: Dict[str, Dict[str, tarfile.TarInfo]] = {}
-        self.source_paths: Dict[str, Path] = {}
-        self.compression_types: Dict[str, str] = {}
+        self.tar_indexes: Dict[str, Dict[str, TileEntry]] = {}
+        self.mmaps: Dict[str, mmap.mmap] = {}
+        self._mmap_files: Dict[str, IO[bytes]] = {}
         self.index_status: Dict[str, Dict[str, Any]] = {}
 
     async def initialize_tileset(
@@ -132,11 +138,11 @@ class TarManager:
                 )
 
                 zoom_levels_sorted = sorted(zoom_levels)
+                fh: IO[bytes] = open(source_path, "rb")
+                mmap_obj = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
                 self.tar_indexes[tileset_name] = member_index
-                self.source_paths[tileset_name] = source_path
-                self.compression_types[tileset_name] = detect_tar_compression(
-                    source_path
-                )
+                self.mmaps[tileset_name] = mmap_obj
+                self._mmap_files[tileset_name] = fh
                 self.index_status[tileset_name] = {
                     "status": "ready",
                     "tile_count": len(member_index),
@@ -185,17 +191,28 @@ class TarManager:
                 )
 
                 zoom_levels_sorted = sorted(zoom_levels)
+                new_fh: IO[bytes] = open(source_path, "rb")
+                new_mmap = mmap.mmap(new_fh.fileno(), 0, access=mmap.ACCESS_READ)
+
+                old_mmap = self.mmaps.get(tileset_name)
+                old_fh = self._mmap_files.get(tileset_name)
+
                 self.tar_indexes[tileset_name] = new_index
-                self.source_paths[tileset_name] = source_path
-                self.compression_types[tileset_name] = detect_tar_compression(
-                    source_path
-                )
+                self.mmaps[tileset_name] = new_mmap
+                self._mmap_files[tileset_name] = new_fh
                 self.index_status[tileset_name] = {
                     "status": "ready",
                     "tile_count": len(new_index),
                     "zoom_levels": zoom_levels_sorted,
                     "last_rebuilt": datetime.datetime.now().isoformat(),
                 }
+
+                # Close old mmap after swap — no await between swap and close,
+                # so no other coroutine can observe a half-replaced state.
+                if old_mmap:
+                    old_mmap.close()
+                if old_fh:
+                    old_fh.close()
 
                 logger.info(
                     "Successfully rebuilt index for tileset '%s': %d tiles",
@@ -220,11 +237,11 @@ class TarManager:
         if_none_match: Optional[str] = None,
     ) -> Tuple[Optional[bytes], str, Dict[str, str]]:
         """
-        Extract a tile from a tar archive using a per-request file descriptor.
+        Extract a tile from a tar archive via an mmap slice.
 
-        TarInfo.offset_data is the absolute byte position in the file recorded
-        during indexing. We open the tar, seek there, read the tile's bytes, and
-        close — no shared handle, no lock, fully concurrent.
+        TileEntry.offset is the absolute byte position in the file recorded during
+        indexing. The file is already mmap'd — extraction is a single in-memory
+        slice with no per-request FD open and no thread-pool dispatch required.
 
         Args:
             tileset_name: Name of the tileset.
@@ -254,20 +271,17 @@ class TarManager:
             )
 
         tar_index = self.tar_indexes.get(tileset_name)
-        source_path = self.source_paths.get(tileset_name)
+        mmap_obj = self.mmaps.get(tileset_name)
 
-        if not tar_index or not source_path:
+        if not tar_index or not mmap_obj:
             raise TarIndexUnavailableError(tileset_name)
 
-        tile_member, tried_extensions = find_tile_in_tar_index(tar_index, z, x, y_name)
-        if not tile_member:
+        tile_entry, tried_extensions = find_tile_in_tar_index(tar_index, z, x, y_name)
+        if not tile_entry:
             raise TileNotFoundError(tileset_name, z, x, y_name, tried_extensions)
 
-        etag = f'W/"{tile_member.mtime}-{tile_member.size}"'
-        media_type = (
-            media_type_for_suffix(Path(tile_member.name).suffix)
-            or "application/octet-stream"
-        )
+        etag = f'W/"{tile_entry.mtime}-{tile_entry.size}"'
+        media_type = media_type_for_suffix(tile_entry.suffix) or "application/octet-stream"
 
         if if_none_match and if_none_match == etag:
             return (
@@ -279,46 +293,20 @@ class TarManager:
                 },
             )
 
-        # Capture scalars before entering the thread — TarInfo is not thread-safe to share.
-        offset = tile_member.offset_data
-        size = tile_member.size
-        mtime = tile_member.mtime
-        compression = self.compression_types.get(tileset_name, "uncompressed")
-
-        if compression == "uncompressed":
-            # Direct seek to the absolute byte offset in the raw file — O(1), fully concurrent.
-            def extract_tile() -> bytes:
-                with open(source_path, "rb") as fh:
-                    fh.seek(offset)
-                    return fh.read(size)
-        else:
-            # Compressed tar: offset_data is a position in the decompressed stream, not the
-            # raw file, so we can't use a raw seek. Open a fresh TarFile per request instead.
-            # This decompresses sequentially up to the tile position — inherently slower, but
-            # compressed tars are already documented as a performance trade-off.
-            def extract_tile() -> bytes:  # type: ignore[misc]
-                with tarfile.open(source_path, "r:*") as tf:
-                    f = tf.extractfile(tile_member)
-                    if f is None:
-                        raise ValueError("extractfile returned None")
-                    data = f.read()
-                    f.close()
-                    return data
-
         try:
-            tile_data = await asyncio.to_thread(extract_tile)
+            tile_data: bytes = mmap_obj[tile_entry.offset : tile_entry.offset + tile_entry.size]
         except Exception as e:
             logger.error(
-                "Error extracting tile from tar for tileset '%s': %s", tileset_name, e
+                "Error reading tile from mmap for tileset '%s': %s", tileset_name, e
             )
             raise TileCorruptedError(
-                tileset_name, z, x, y_name, f"Extraction failed: {str(e)}"
+                tileset_name, z, x, y_name, f"mmap read failed: {e}"
             )
 
         headers = {
             "Cache-Control": "public, max-age=86400, immutable",
             "ETag": etag,
-            "Last-Modified": email.utils.formatdate(mtime, usegmt=True),
+            "Last-Modified": email.utils.formatdate(tile_entry.mtime, usegmt=True),
             "X-Tile-Server": "event-optimized",
             "X-Cache-Strategy": "local-event",
             "X-Tileset": tileset_name,
@@ -328,4 +316,10 @@ class TarManager:
         return tile_data, media_type, headers
 
     async def close_all(self) -> None:
-        """No-op: per-request file descriptors are closed after each extraction."""
+        """Close all mmap views and underlying file handles."""
+        for mmap_obj in self.mmaps.values():
+            mmap_obj.close()
+        for fh in self._mmap_files.values():
+            fh.close()
+        self.mmaps.clear()
+        self._mmap_files.clear()

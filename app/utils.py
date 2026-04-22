@@ -1,8 +1,7 @@
 """Utility functions for tile detection, path finding, and media type resolution."""
 
-import tarfile
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 # ---- Constants ----
 SUPPORTED_EXTS: Tuple[str, ...] = (".png", ".jpg", ".jpeg", ".webp")
@@ -54,6 +53,15 @@ def detect_tar_compression(tar_path: Path) -> str:
     return "unknown"
 
 
+class TileEntry(NamedTuple):
+    """Lightweight index entry replacing a full TarInfo object."""
+
+    offset: int    # TarInfo.offset_data — absolute byte position of tile data
+    size: int      # byte length of the tile
+    mtime: float   # modification time used for ETag and Last-Modified
+    suffix: str    # file extension including dot, e.g. ".png"
+
+
 def parse_tile_member_path(member_path: str) -> Optional[Tuple[str, str, str]]:
     """
     Parse a tar member path into (z_str, x_str, y_name) if it matches z/x/y.ext.
@@ -72,21 +80,21 @@ def parse_tile_member_path(member_path: str) -> Optional[Tuple[str, str, str]]:
 
 
 def find_tile_in_tar_index(
-    tar_index: Dict[str, tarfile.TarInfo], z: int, x: int, y_name: str
-) -> Tuple[Optional[tarfile.TarInfo], List[str]]:
+    tar_index: Dict[str, TileEntry], z: int, x: int, y_name: str
+) -> Tuple[Optional[TileEntry], List[str]]:
     """
-    Find tile member in pre-built tar index.
+    Find a tile entry in the pre-built tar index.
 
     Tries the exact filename first, then probes other supported extensions.
 
     Args:
-        tar_index: Pre-built index mapping "z/x/y.ext" to TarInfo objects.
+        tar_index: Pre-built index mapping "z/x/y.ext" to TileEntry objects.
         z: Zoom level.
         x: X tile coordinate.
         y_name: Y coordinate with file extension (e.g., "123.png").
 
     Returns:
-        Tuple of (TarInfo if found else None, list of tried extensions).
+        Tuple of (TileEntry if found else None, list of tried extensions).
     """
     y_path = Path(y_name)
     stem = y_path.stem
