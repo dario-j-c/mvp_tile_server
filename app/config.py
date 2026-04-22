@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, TypedDict
 
 from typing_extensions import NotRequired
 
-from app.utils import detect_tar_compression, is_tar_file
+from app.utils import detect_tar_compression, is_tar_file, parse_tile_member_path
 
 logger = logging.getLogger("event_tile_server")
 
@@ -45,26 +45,21 @@ def auto_detect_base_path(tar_path: Path, max_members: int = 100) -> Optional[st
     """
     detected_bases: List[str] = []
 
-    try:
-        with tarfile.open(tar_path, "r:*") as tar:
+    # Let tarfile.open failures propagate — callers treat them as config errors.
+    with tarfile.open(tar_path, "r:*") as tar:
+        try:
             for i, member in enumerate(tar):
                 if i >= max_members:
                     break
-
                 if member.isfile():
                     match = TILE_PATTERN.match(member.name)
                     if match and match.group(1):
-                        base = match.group(1).rstrip("/")
-                        detected_bases.append(base)
+                        detected_bases.append(match.group(1).rstrip("/"))
+        except Exception as e:
+            logger.warning("Error reading tar members for %s: %s", tar_path, e)
 
-        # Return most common base path
-        if detected_bases:
-            most_common = Counter(detected_bases).most_common(1)[0][0]
-            return most_common
-
-    except Exception as e:
-        logger.warning("Error auto-detecting base_path for %s: %s", tar_path, e)
-
+    if detected_bases:
+        return Counter(detected_bases).most_common(1)[0][0]
     return None
 
 
@@ -194,7 +189,9 @@ def load_tileset_config(
                         "Consider using .tar for better performance."
                     )
 
-                # Auto-detect base_path if not provided
+                # Auto-detect base_path if not provided.
+                # auto_detect_base_path propagates tarfile.open failures, so it
+                # also serves as validation — no separate open needed.
                 if base_path is None:
                     detected = auto_detect_base_path(resolved_path)
                     if detected:
@@ -204,10 +201,11 @@ def load_tileset_config(
                             name,
                             base_path,
                         )
-
-                # Validate tar can be opened
-                with tarfile.open(resolved_path, "r:*") as _tar:
-                    pass  # Just test opening
+                else:
+                    # base_path explicitly provided — auto-detect was skipped,
+                    # so validate the tar opens here.
+                    with tarfile.open(resolved_path, "r:*") as _tar:
+                        pass
 
                 validated_tilesets[name] = {
                     "source_type": "tar",
@@ -358,18 +356,14 @@ def scan_tiles(
                     if normalized_base and member_path.startswith(normalized_base):
                         member_path = member_path[len(normalized_base) :]
 
-                    # Check if this matches tile pattern: z/x/y.ext
-                    parts = member_path.split("/")
-                    if len(parts) >= 3:
-                        z_str, x_str, y_name = parts[-3], parts[-2], parts[-1]
-                        if z_str.isdigit() and x_str.isdigit():
-                            z = int(z_str)
-                            x = int(x_str)
-                            zoom_levels_found.add(z)
-                            tile_count += 1
-
-                            if len(sample_tiles) < max_samples:
-                                sample_tiles.append(f"{z}/{x}/{y_name}")
+                    parsed = parse_tile_member_path(member_path)
+                    if parsed:
+                        z_str, x_str, y_name = parsed
+                        z, x = int(z_str), int(x_str)
+                        zoom_levels_found.add(z)
+                        tile_count += 1
+                        if len(sample_tiles) < max_samples:
+                            sample_tiles.append(f"{z}/{x}/{y_name}")
 
         except Exception as e:
             logger.error("Error scanning tar file %s: %s", source_path, e)

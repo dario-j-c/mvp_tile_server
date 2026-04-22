@@ -35,7 +35,6 @@ from app.config import (
     DEFAULT_MAX_Z,
     DEFAULT_MIN_Z,
     load_tileset_config,
-    scan_all_tilesets,
     scan_tiles,
 )
 from app.exceptions import (
@@ -101,50 +100,141 @@ def create_app(
         # Startup
         logger.info("Event tile server starting with %d tilesets", len(tilesets))
 
-        # Initialize tar manager
         tar_manager = TarManager()
+        tileset_metadata: dict = {}
 
-        # Initialize tar-based tilesets
+        # Initialize tar tilesets: builds the index needed for serving and yields
+        # metadata (count, zooms, samples) for free — no separate scan required.
         for tileset_name, tileset_info in tilesets.items():
-            if tileset_info["source_type"] == "tar":
-                source_path: Path = tileset_info["source_path"]
-                base_path: str = tileset_info.get("base_path", "")
+            if tileset_info["source_type"] != "tar":
+                continue
 
-                try:
-                    await tar_manager.initialize_tileset(
-                        tileset_name, source_path, base_path
-                    )
-                except Exception as e:
-                    logger.error(
-                        "Failed to initialize tar tileset '%s': %s", tileset_name, e
-                    )
-                    # Continue with other tilesets even if one fails
+            source_path: Path = tileset_info["source_path"]
+            base_path: str = tileset_info.get("base_path", "")
 
-        # Load metadata (prefer pre-scanned from MAIN, fallback to scanning or defaults)
-        tileset_metadata = {}
-        if pre_scanned_metadata:
-            tileset_metadata = pre_scanned_metadata
-            logger.info(
-                "Using pre-scanned metadata for %d tilesets", len(tileset_metadata)
-            )
-        elif do_scan:
-            logger.info("Pre-calculating tile metadata for all tilesets...")
-            tileset_metadata = scan_all_tilesets(tilesets)
-        else:
-            # Create minimal metadata without scanning
-            for name, tileset_info in tilesets.items():
-                tileset_metadata[name] = {
-                    "source_path": str(tileset_info["source_path"]),
-                    "source_type": tileset_info["source_type"],
-                    "base_path": tileset_info.get("base_path", ""),
-                    "tile_count": 0,
+            try:
+                tile_count, sample_tiles, zoom_levels = await tar_manager.initialize_tileset(
+                    tileset_name, source_path, base_path
+                )
+                min_zoom = min(zoom_levels) if zoom_levels else DEFAULT_MIN_Z
+                max_zoom = max(zoom_levels) if zoom_levels else DEFAULT_MAX_Z
+                tileset_metadata[tileset_name] = {
+                    "source_path": str(source_path),
+                    "source_type": "tar",
+                    "base_path": base_path,
+                    "tile_count": tile_count,
                     "tile_count_complete": True,
+                    "sample_tiles": [f"/{tileset_name}/{t}" for t in sample_tiles],
+                    "zoom_levels": zoom_levels,
+                    "min_zoom": min_zoom,
+                    "max_zoom": max_zoom,
+                    "scanned_at": datetime.datetime.now().isoformat(),
+                }
+                if zoom_levels:
+                    logger.info(
+                        "Tileset '%s': %d tiles, zoom %d-%d",
+                        tileset_name, tile_count, min_zoom, max_zoom,
+                    )
+                else:
+                    logger.info(
+                        "Tileset '%s': %d tiles, no zoom structure detected",
+                        tileset_name, tile_count,
+                    )
+            except Exception as e:
+                logger.error(
+                    "Failed to initialize tar tileset '%s': %s", tileset_name, e
+                )
+                tileset_metadata[tileset_name] = {
+                    "source_path": str(source_path),
+                    "source_type": "tar",
+                    "base_path": base_path,
+                    "tile_count": 0,
+                    "tile_count_complete": False,
                     "sample_tiles": [],
                     "zoom_levels": [],
                     "min_zoom": DEFAULT_MIN_Z,
                     "max_zoom": DEFAULT_MAX_Z,
-                    "scanned_at": None,
+                    "scanned_at": datetime.datetime.now().isoformat(),
                 }
+
+        if pre_scanned_metadata:
+            # MAIN process pre-scanned directory tilesets; merge into tileset_metadata
+            # which already holds tar metadata from initialize_tileset above.
+            tileset_metadata.update(pre_scanned_metadata)
+            logger.info(
+                "Using pre-scanned directory metadata for %d tilesets",
+                len(pre_scanned_metadata),
+            )
+        else:
+            # Directory tilesets: scan (or use defaults), tar metadata already set above.
+            for tileset_name, tileset_info in tilesets.items():
+                if tileset_info["source_type"] != "directory":
+                    continue
+
+                source_path = tileset_info["source_path"]
+
+                if do_scan:
+                    logger.info("Scanning directory tileset '%s'...", tileset_name)
+                    try:
+                        (
+                            tile_count, sample_tiles, zoom_levels,
+                            min_zoom, max_zoom, scan_complete,
+                        ) = await asyncio.to_thread(
+                            scan_tiles,
+                            source_path=source_path,
+                            source_type="directory",
+                        )
+                        tileset_metadata[tileset_name] = {
+                            "source_path": str(source_path),
+                            "source_type": "directory",
+                            "base_path": "",
+                            "tile_count": tile_count,
+                            "tile_count_complete": scan_complete,
+                            "sample_tiles": [f"/{tileset_name}/{t}" for t in sample_tiles],
+                            "zoom_levels": zoom_levels,
+                            "min_zoom": min_zoom,
+                            "max_zoom": max_zoom,
+                            "scanned_at": datetime.datetime.now().isoformat(),
+                        }
+                        if zoom_levels:
+                            logger.info(
+                                "Tileset '%s': %d tiles, zoom %d-%d",
+                                tileset_name, tile_count, min_zoom, max_zoom,
+                            )
+                        else:
+                            logger.info(
+                                "Tileset '%s': %d tiles, no zoom structure detected",
+                                tileset_name, tile_count,
+                            )
+                    except Exception as e:
+                        logger.error(
+                            "Error scanning directory tileset '%s': %s", tileset_name, e
+                        )
+                        tileset_metadata[tileset_name] = {
+                            "source_path": str(source_path),
+                            "source_type": "directory",
+                            "base_path": "",
+                            "tile_count": 0,
+                            "tile_count_complete": False,
+                            "sample_tiles": [],
+                            "zoom_levels": [],
+                            "min_zoom": DEFAULT_MIN_Z,
+                            "max_zoom": DEFAULT_MAX_Z,
+                            "scanned_at": datetime.datetime.now().isoformat(),
+                        }
+                else:
+                    tileset_metadata[tileset_name] = {
+                        "source_path": str(source_path),
+                        "source_type": "directory",
+                        "base_path": "",
+                        "tile_count": 0,
+                        "tile_count_complete": True,
+                        "sample_tiles": [],
+                        "zoom_levels": [],
+                        "min_zoom": DEFAULT_MIN_Z,
+                        "max_zoom": DEFAULT_MAX_Z,
+                        "scanned_at": None,
+                    }
 
         app.state.tilesets = tilesets
         app.state.tileset_metadata = tileset_metadata
@@ -351,28 +441,43 @@ def create_app(
             raise TilesetNotFoundError(tileset_name, available)
 
         tileset_info = request.app.state.tilesets[tileset_name]
-        source_path: Path = tileset_info["source_path"]
         source_type: str = tileset_info["source_type"]
-        base_path: str = tileset_info.get("base_path", "")
-
-        try:
-            tile_count, sample_tiles, zoom_levels, min_zoom, max_zoom, scan_complete = await asyncio.to_thread(
-                scan_tiles,
-                source_path=source_path,
-                source_type=source_type,
-                base_path=base_path,
-            )
-        except Exception as e:
-            logger.error("Error rescanning tileset '%s': %s", tileset_name, e)
-            raise HTTPException(status_code=500, detail=f"Rescan failed: {str(e)}")
-
-        sample_tiles_with_tileset = [f"/{tileset_name}/{t}" for t in sample_tiles]
         scanned_at = datetime.datetime.now().isoformat()
+
+        if source_type == "tar":
+            # Tar metadata is already in the in-memory index — no file I/O needed.
+            # To pick up changes to the tar file itself, use /admin/rebuild instead.
+            tar_manager = request.app.state.tar_manager
+            tar_index = tar_manager.tar_indexes.get(tileset_name, {})
+            status = tar_manager.index_status.get(tileset_name, {})
+            zoom_levels = status.get("zoom_levels", [])
+            tile_count = len(tar_index)
+            min_zoom = min(zoom_levels) if zoom_levels else DEFAULT_MIN_Z
+            max_zoom = max(zoom_levels) if zoom_levels else DEFAULT_MAX_Z
+            sample_tiles = [f"/{tileset_name}/{k}" for k in list(tar_index.keys())[:5]]
+            scan_complete = True
+        else:
+            source_path: Path = tileset_info["source_path"]
+            base_path: str = tileset_info.get("base_path", "")
+            try:
+                (
+                    tile_count, raw_samples, zoom_levels,
+                    min_zoom, max_zoom, scan_complete,
+                ) = await asyncio.to_thread(
+                    scan_tiles,
+                    source_path=source_path,
+                    source_type=source_type,
+                    base_path=base_path,
+                )
+            except Exception as e:
+                logger.error("Error rescanning tileset '%s': %s", tileset_name, e)
+                raise HTTPException(status_code=500, detail=f"Rescan failed: {str(e)}")
+            sample_tiles = [f"/{tileset_name}/{t}" for t in raw_samples]
 
         request.app.state.tileset_metadata[tileset_name].update({
             "tile_count": tile_count,
             "tile_count_complete": scan_complete,
-            "sample_tiles": sample_tiles_with_tileset,
+            "sample_tiles": sample_tiles,
             "zoom_levels": zoom_levels,
             "min_zoom": min_zoom,
             "max_zoom": max_zoom,
@@ -382,7 +487,7 @@ def create_app(
         return {
             "status": "success",
             "tileset": tileset_name,
-            "tile_count": tile_count,
+            "tile_count": f"{tile_count:,}",
             "tile_count_complete": scan_complete,
             "zoom_levels": zoom_levels,
             "scanned_at": scanned_at,
@@ -569,7 +674,7 @@ def get_app() -> FastAPI:
     Uvicorn factory entry point.
 
     Reads configuration from environment variables:
-        CONFIG_PATH: Path to tileset config file (default: 'tilesets.json').
+        CONFIG_PATH: Path to tileset config file (default: 'config.json').
         TILE_SCAN: '1' to enable startup scan (default), '0' to disable.
         TILE_METADATA_FILE: Path to pre-scanned metadata (from MAIN process).
 

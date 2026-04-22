@@ -115,17 +115,32 @@ def main() -> None:
         print(f"\nUnexpected error loading configuration: {e}")
         sys.exit(1)
 
-    # Perform tile scanning in MAIN process (once, not per-worker)
+    # Pre-scan directory tilesets in MAIN process (once, not per-worker).
+    # Tar tilesets are skipped here — workers derive their metadata for free
+    # from build_tar_index during initialize_tileset, with no extra I/O.
     metadata_file = None
     if not args.no_scan:
-        logger.info("Scanning tilesets for metadata...")
-        tileset_metadata = scan_all_tilesets(tilesets)
-
-        # Write metadata to temp file for workers to read
-        fd, metadata_file = tempfile.mkstemp(suffix=".json", prefix="tile_metadata_")
-        with os.fdopen(fd, "w") as f:
-            json.dump(tileset_metadata, f)
-        logger.info("Scan complete. Metadata saved for workers.")
+        directory_tilesets = {
+            name: info for name, info in tilesets.items()
+            if info["source_type"] == "directory"
+        }
+        if directory_tilesets:
+            logger.info("Scanning %d directory tileset(s) for metadata...", len(directory_tilesets))
+            dir_metadata = scan_all_tilesets(directory_tilesets)
+            try:
+                fd, metadata_file = tempfile.mkstemp(suffix=".json", prefix="tile_metadata_")
+                with os.fdopen(fd, "w") as f:
+                    json.dump(dir_metadata, f)
+                logger.info("Scan complete. Metadata saved for workers.")
+            except OSError as e:
+                logger.warning(
+                    "Could not write pre-scan metadata to temp file (%s). "
+                    "Workers will scan directory tilesets independently — startup will be slower.",
+                    e,
+                )
+                metadata_file = None
+        else:
+            logger.info("No directory tilesets to pre-scan.")
 
     # Export env for worker factory to consume
     os.environ["CONFIG_PATH"] = args.config
@@ -180,7 +195,7 @@ def main() -> None:
         )
 
     try:
-        uvicorn.run(**uvicorn_config)
+        uvicorn.run(**uvicorn_config)  # pyrefly: ignore
     except KeyboardInterrupt:
         print("\nEvent tile server stopped.")
     except Exception as e:
