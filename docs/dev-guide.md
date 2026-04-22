@@ -26,10 +26,10 @@ This is a FastAPI tile server. It reads pre-built map tile files and serves them
 
 Tiles are addressed by three integers — zoom level `z`, column `x`, row `y` — and fetched at URLs like `/osm/10/512/341.png`. The server supports two storage backends:
 
-- **Directory tilesets** — tiles stored as files in a `z/x/y.ext` directory tree
-- **Tar tilesets** — all tiles packed into a single `.tar` archive (optionally compressed)
+- **Tar tilesets** — the default for event deployments. All tiles are packed into a single uncompressed `.tar` file. At startup each worker builds an in-memory index (one `TileEntry` per tile recording the byte offset, size, mtime, and extension), then memory-maps the file. Tile requests are served by a single in-memory slice — no filesystem calls at request time.
+- **Directory tilesets** — tiles stored as files in a `z/x/y.ext` directory tree. Each request requires 1–5 `stat` calls for extension probing plus an async file read. Use this when tiles need to be updated on disk without a server restart; otherwise prefer tar.
 
-Multiple independent tilesets can be configured and served simultaneously. The server is tuned for local deployments (events, installations) where restarts are disruptive.
+Multiple independent tilesets can be configured simultaneously, mixing types. The server is tuned for local deployments (events, installations) where restarts are disruptive.
 
 ---
 
@@ -455,5 +455,7 @@ If you add a key, write it in the lifespan (for startup), in `rescan_tileset` (f
 **Config is validated at startup and never reloaded.** `app.state.tilesets` is set once in `lifespan` and never changed. To add or remove a tileset, you must restart the server.
 
 **Extension probing order.** Both `find_tile_path` and `find_tile_in_tar_index` try the requested extension first, then probe `.png`, `.jpg`, `.jpeg`, `.webp`. If the client requests `341.png` but the file is `341.jpg`, the server returns the `.jpg` with `Content-Type: image/jpeg`. This is intentional but can surprise clients that expect the content type to match the requested extension.
+
+For **directory tilesets on network mounts** (NFS, EFS, SMB), failed probes are expensive: each `is_file()` call that misses crosses the network. Five failed probes per 404 on a sparse tileset will cause measurable latency spikes. Use tar for network-stored tilesets, or ensure the client always requests the correct extension.
 
 **Zoom validation uses metadata, not filesystem reality.** If `min_zoom=10` and `max_zoom=14` in `tileset_metadata`, a request for zoom 9 returns `INVALID_ZOOM_LEVEL` even if a `9/` directory exists. The metadata is set at startup scan or rescan. After adding tiles at a new zoom level, call `POST /admin/rescan/{name}` to update the bounds.

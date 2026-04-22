@@ -7,8 +7,8 @@ A high-performance FastAPI tile server for serving multiple tilesets from direct
 Designed to serve tiles to looping displays and interactive maps at events where the server runs locally and restarts are disruptive. Supports multiple independent tilesets, configurable at runtime without code changes.
 
 **Tile sources:**
-- **Directories** — standard `z/x/y.ext` filesystem layout
-- **Tar archives** — uncompressed `.tar` (recommended) or compressed `.tar.gz / .tar.bz2 / .tar.xz`; tiles are streamed directly without extraction
+- **Tar archives** — the default choice. Tiles are served by seeking to a pre-indexed byte offset in a memory-mapped file — no per-request disk I/O, no thread-pool overhead. Use uncompressed `.tar`; compressed formats are rejected at startup.
+- **Directories** — standard `z/x/y.ext` filesystem layout. Use when tiles need to be updated live without a server restart. Slower than tar due to per-request filesystem lookups.
 
 **Detailed docs:**
 - [Usage & API Reference](docs/usage.md) — all CLI options, every endpoint, request/response format
@@ -76,6 +76,17 @@ Config is a JSON file with a `tilesets` dict. Each entry is either a path string
 
 **Tar `base_path`:** the path inside the archive where `z/x/y.ext` tiles begin. Omit it and the server auto-detects. Use `python inspect_tar.py /path/to/archive.tar` to inspect an archive before configuring it.
 
+**Choosing a source type:**
+
+| | Tar | Directory |
+|---|---|---|
+| Tile lookup | O(1) in-memory index | 1–5 filesystem stat calls |
+| Extraction | mmap slice — no disk I/O | async file read from disk |
+| Live tile updates | Requires `/admin/rebuild` | Instant — files read on demand |
+| **Use when** | **Performance matters (events)** | **Tiles change without restarts** |
+
+For event deployments, prefer tar. Use a directory only when you need to swap, add, or remove individual tile files while the server is running.
+
 See `config/config_example.json` for a documented template.
 
 ---
@@ -142,16 +153,20 @@ The container expects your config at `/app/config.json` (mapped from `config/con
 
 ---
 
-## Tar Archive Recommendations
+## Packing Tiles into a Tar
 
-**Use uncompressed `.tar` files.** Compressed formats require sequential decompression per request and will be significantly slower. The server warns on startup when compressed archives are loaded.
+For anything performance-sensitive, pack your tiles into an uncompressed tar before deploying. Tar serving is faster than directory serving: tile lookup is an O(1) index read, and extraction is a direct in-memory slice with no filesystem calls per request.
 
 ```bash
-# Create uncompressed (recommended)
-tar -cf tiles.tar -C /source/dir .
+tar -cf tiles.tar -C /path/to/tile/directory .
+```
 
-# Not recommended — slower per request
-tar -czf tiles.tar.gz -C /source/dir .
+Compressed formats (`.tar.gz`, `.tar.bz2`, `.tar.xz`) are not supported — the server will refuse to start if one is configured.
+
+To check a tar's structure before configuring it:
+
+```bash
+python inspect_tar.py /path/to/tiles.tar
 ```
 
 ---

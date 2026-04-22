@@ -46,7 +46,7 @@ Startup scans directory tilesets to determine tile count and zoom bounds. For la
 
 **Options:**
 - `--no-scan` — skips all scanning; zoom bounds default to 1–25. Tile requests outside the actual zoom range will return `404 INVALID_ZOOM_LEVEL` if the scanned bounds are used elsewhere; without scanning, all zoom values 1–25 are accepted and requests for missing tiles return `404 TILE_NOT_FOUND` instead.
-- Use tar archives — tar metadata is derived from the index at startup (header-only read, no tile data), which is much faster than walking a directory tree for large tilesets.
+- Use tar archives — tar metadata is derived from the index at startup (header-only read, no tile data), which is much faster than walking a directory tree for large tilesets. Tar serving is also faster at request time, so this is the right default for event deployments regardless of startup speed.
 
 Tar index building is proportional to the number of files, not the file size. ~1 million tiles in an uncompressed tar typically indexes in 15–60 seconds on SSD.
 
@@ -185,11 +185,14 @@ The tile file exists but cannot be read. Check:
 
 ### High latency on directory tilesets under load
 
-Directory tilesets use `asyncio.to_thread` for each file stat and read, so they don't block the event loop. Under high concurrency, the bottleneck is typically the OS or filesystem.
+Directory serving requires 1–5 `stat` calls per request for extension probing, plus an async file read, all going through the thread pool. This is correct FastAPI practice, but it's inherently more expensive than tar serving, which is a single in-memory mmap slice with no filesystem calls.
 
+For best performance, pack your tiles into an uncompressed tar. Directories are the right choice only when tiles need to be updated live without a server restart.
+
+If you must use directories:
 - Increase `--workers` to add more processes
 - Check disk I/O with `iostat` or `iotop`
-- Consider switching to an uncompressed tar — fewer filesystem opens, OS page cache is more effective
+- Avoid network mounts (NFS, EFS, SMB) — each failed `stat` probe on a missing tile crosses the network; five of them per 404 adds up fast on sparse tilesets
 
 ### High latency on tar tilesets
 
