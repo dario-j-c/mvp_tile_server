@@ -102,21 +102,24 @@ The server probes `.png`, `.jpg`, `.jpeg`, `.webp` automatically. If your tiles 
 
 ---
 
-### Compressed tar is slow
+### Compressed tar rejected at startup
 
-By design. Compressed tars (`.tar.gz`, `.tar.bz2`, `.tar.xz`) require decompressing from the start of the file to reach each tile's position. Performance degrades as the archive gets larger and as tile positions move deeper into it.
+```
+Found 1 configuration error:
+
+• Tileset 'satellite': Compressed tar files (.tar.gz, .tar.bz2, .tar.xz) are not supported...
+```
+
+The server refuses to start with compressed archives. Compressed tars require sequential decompression from byte 0 to reach any tile — concurrent requests would each decompress the entire file up to their target position, causing CPU saturation under normal event traffic.
 
 **Fix:** repack as uncompressed:
 
 ```bash
-# Extract, repack without compression
 mkdir /tmp/tiles_extracted
 tar -xf tiles.tar.gz -C /tmp/tiles_extracted
 tar -cf tiles.tar -C /tmp/tiles_extracted .
 rm -rf /tmp/tiles_extracted
 ```
-
-The server warns on startup when a compressed archive is loaded.
 
 ---
 
@@ -190,12 +193,11 @@ Directory tilesets use `asyncio.to_thread` for each file stat and read, so they 
 
 ### High latency on tar tilesets
 
-For uncompressed tars, each tile extraction opens the file, seeks to the tile's offset (stored in the index), reads the bytes, and closes. Under high concurrency this is fully parallel — no lock is held. Latency should be low on SSD.
+Each tile extraction is an in-memory slice of a memory-mapped tar file. The byte offset is recorded in the index at startup; reads are O(1) with no per-request file open and no thread-pool dispatch. Latency should be very low.
 
 If latency is high:
-- Confirm the archive is uncompressed (`GET /admin/status/{name}` shows `zoom_levels` but not compression; use `python inspect_tar.py` to check)
-- Check whether the file is on a network mount; local SSD is strongly preferred
-- For compressed archives, switch to uncompressed (see above)
+- Check whether the tar file is on a network mount; local SSD is strongly preferred
+- Check OS page cache pressure — a very large tar with cold cache will fault pages on first access; subsequent reads are pure RAM
 
 ### Tile count shows 0 or very low
 

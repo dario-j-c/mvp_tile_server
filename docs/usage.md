@@ -24,7 +24,7 @@ uv run python -m app [config] [options]
 1. **Config validation** — all paths are resolved and checked; any errors are printed and the process exits.
 2. **Directory pre-scan** (MAIN process, skipped with `--no-scan`) — directory tilesets are scanned once to determine tile count and zoom bounds. Results are written to a temp file for workers to read. Tar tilesets are not scanned here.
 3. **Workers start** — each worker:
-   - Builds an in-memory index of every tar tileset (reads all member headers; no tile data is read).
+   - Builds an in-memory index of every tar tileset (reads all member headers; no tile data is read). Each entry records only the four values needed for serving: byte offset, size, mtime, and file extension (`TileEntry`). The file is then memory-mapped (one `mmap` per tileset) so tile reads are direct in-memory slices — no per-request file open.
    - Metadata for tar tilesets (tile count, zoom levels, sample tiles) is derived from the index — no extra scan.
    - Directory metadata is read from the pre-scan temp file (or defaults if `--no-scan` was used).
 4. **Server ready** — requests are accepted.

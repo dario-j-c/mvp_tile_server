@@ -119,7 +119,7 @@ python -m app config.json              (MAIN process starts)
                       └─ app.state.tar_manager = tar_manager   (indexes live here)
 ```
 
-After `lifespan` yields, the server is ready. On shutdown, `close_all()` is called (currently a no-op since there are no shared file handles).
+After `lifespan` yields, the server is ready. On shutdown, `close_all()` closes all mmap views and their underlying file handles.
 
 ---
 
@@ -143,7 +143,7 @@ Then it branches by source type:
 
 **Directory:** calls `find_tile_path(base_dir, z, x, y_name)` in a thread (blocking I/O off the event loop), returns a `FileResponse`. Extension probing happens inside `find_tile_path`: tries the requested extension first, then `.png`, `.jpg`, `.jpeg`, `.webp`.
 
-**Tar:** calls `tar_manager.get_tile_from_tar(...)` which looks up the tile in the in-memory index and extracts the bytes. For 304 caching, ETag is `W/"mtime-size"` derived from the `TarInfo` object.
+**Tar:** calls `tar_manager.get_tile_from_tar(...)` which looks up the tile in the in-memory index and slices the bytes from the memory-mapped file. For 304 caching, ETag is `W/"mtime-size"` from the `TileEntry`; the slice is a synchronous in-memory read with no thread-pool dispatch.
 
 Both paths set `Cache-Control: public, max-age=86400, immutable` and honour `If-None-Match`.
 
@@ -158,33 +158,31 @@ This is the most non-obvious part of the system and the most performance-sensiti
 `build_tar_index()` in `tar_manager.py` opens the tar file and iterates every member. For each member that matches the `z/x/y.ext` structure, it records a mapping:
 
 ```
-"10/512/341.png"  →  TarInfo object
+"10/512/341.png"  →  TileEntry(offset=8192, size=4096, mtime=1705312200.0, suffix=".png")
 ```
 
-`TarInfo` is Python's representation of a tar header. The key field is `TarInfo.offset_data`: the **absolute byte position** in the tar file where the tile's data begins. The `size` field tells us how many bytes to read.
+`TileEntry` is a `NamedTuple` of four scalars — the only values needed for serving. `offset` is the absolute byte position in the raw file where the tile's data begins (`TarInfo.offset_data`); `size` is how many bytes to read.
+
+Full `TarInfo` objects are not kept: they hold uid, gid, linkname, and dozens of other fields that are irrelevant after indexing and would multiply RAM usage significantly for large tilesets.
 
 ### How per-request extraction works
 
-When a tile is requested, the handler calls:
+At startup, after building the index, the tar file is memory-mapped:
 
 ```python
 fh = open(source_path, "rb")
-fh.seek(tile_member.offset_data)
-data = fh.read(tile_member.size)
-fh.close()
+mmap_obj = mmap.mmap(fh.fileno(), 0, access=mmap.ACCESS_READ)
 ```
 
-This runs in `asyncio.to_thread()` so it doesn't block the event loop. Because each request opens its own file descriptor and seeks independently, there is **no shared state between concurrent requests**. Thousands of requests can run in parallel without any locking.
+One file descriptor and one mmap are kept per tileset per worker. When a tile is requested:
 
-### Why this only works for uncompressed tars
+```python
+tile_data = mmap_obj[tile_entry.offset : tile_entry.offset + tile_entry.size]
+```
 
-For uncompressed `.tar` files, `offset_data` is a position in the raw file on disk. `seek()` jumps directly to that byte — O(1) regardless of file size.
+This is a synchronous in-memory slice. The OS handles paging — only the pages that contain the requested tile are loaded from disk. There is no per-request file open, no seek syscall, no lock, and no thread-pool dispatch. Concurrent requests are safe because mmap reads are read-only and independent.
 
-For compressed tars (`.tar.gz`, `.tar.bz2`, `.tar.xz`), `offset_data` is a position in the **decompressed stream**, which doesn't correspond to any raw byte position in the file. The only way to reach a specific member is to decompress from the beginning of the file up to that point.
-
-The code detects this via `detect_tar_compression()` and uses a different extraction path for compressed files: opens a full `tarfile.TarFile` per request via `tarfile.open(path, "r:*")`. This is inherently slower because it must decompress everything before the tile position. It works, but it degrades as the archive grows. The server warns at startup when a compressed archive is loaded.
-
-**The practical upshot:** always use uncompressed `.tar` for any tileset you care about performance on. See `docs/troubleshooting.md` for how to repack.
+**Only uncompressed `.tar` files are supported.** For uncompressed tars, `offset_data` is an absolute position in the raw file on disk, so the mmap slice is O(1). For compressed formats, `offset_data` is a position in the decompressed stream and doesn't correspond to any raw byte position — the only way to reach a member would be to decompress sequentially from the beginning. The server rejects compressed archives at startup.
 
 ### Rebuild without restart
 
@@ -192,10 +190,12 @@ The code detects this via `detect_tar_compression()` and uses a different extrac
 
 1. Sets `index_status[name]["status"] = "rebuilding"` — tile requests during this window return 503
 2. Calls `build_tar_index()` in a thread — reads new tar headers
-3. Atomically replaces `self.tar_indexes[name]` — now serving from new file
-4. Updates `index_status[name]["status"] = "ready"`
+3. Opens a new file handle and mmap for the new file
+4. Atomically swaps the index and mmap — now serving from new file
+5. Closes the old mmap and file handle
+6. Updates `index_status[name]["status"] = "ready"`
 
-The rebuild lock (`self.rebuild_lock`) prevents two rebuilds running concurrently.
+There is no await between step 4 and step 5, so no other coroutine can observe the half-replaced state. The rebuild lock (`self.rebuild_lock`) prevents two rebuilds running concurrently.
 
 ---
 
@@ -213,9 +213,9 @@ All per-request-cycle state lives on `app.state`, which FastAPI makes available 
 
 | Attribute | Contents |
 |---|---|
-| `tar_indexes` | `{tileset_name: {"z/x/y.ext": TarInfo, ...}}` |
-| `source_paths` | `{tileset_name: Path}` |
-| `compression_types` | `{tileset_name: "uncompressed" / "gzip" / ...}` |
+| `tar_indexes` | `{tileset_name: {"z/x/y.ext": TileEntry, ...}}` |
+| `mmaps` | `{tileset_name: mmap.mmap}` — one memory-mapped view per tileset |
+| `_mmap_files` | `{tileset_name: IO[bytes]}` — underlying file handles kept open for the mmap |
 | `index_status` | `{tileset_name: {"status": "ready", "tile_count": N, "zoom_levels": [...], ...}}` |
 | `rebuild_lock` | `asyncio.Lock` — prevents concurrent rebuilds |
 
@@ -258,13 +258,13 @@ Two public responsibilities:
 
 ### `app/tar_manager.py`
 
-**`build_tar_index(tar_path, base_path)`** — standalone function. Opens the tar and builds the member index in one pass, simultaneously collecting zoom levels and sample tiles. Returns `(member_index, zoom_levels_set, sample_tiles_list)`. Called by `TarManager.initialize_tileset` and `TarManager.rebuild_index`.
+**`build_tar_index(tar_path, base_path)`** — standalone function. Opens the tar and builds the member index in one pass, simultaneously collecting zoom levels and sample tiles. Each index entry is a `TileEntry(offset, size, mtime, suffix)`. Returns `(member_index, zoom_levels_set, sample_tiles_list)`. Called by `TarManager.initialize_tileset` and `TarManager.rebuild_index`.
 
 **`TarManager`** — the class that owns all tar state for a worker.
-- `initialize_tileset()` — called once per tar tileset at startup; builds the index and stores metadata.
-- `rebuild_index()` — called by the rebuild admin endpoint; replaces the index atomically.
-- `get_tile_from_tar()` — called per tile request; looks up the index, extracts bytes.
-- `close_all()` — no-op (no shared handles to close).
+- `initialize_tileset()` — called once per tar tileset at startup; builds the index, opens the file, creates the mmap, and returns `(tile_count, sample_tiles, zoom_levels)`.
+- `rebuild_index()` — called by the rebuild admin endpoint; builds a new index and mmap, swaps them atomically, then closes the old pair.
+- `get_tile_from_tar()` — called per tile request; looks up the `TileEntry` in the index and slices the bytes from the mmap.
+- `close_all()` — closes all mmap views and underlying file handles; called on worker shutdown.
 
 ### `app/exceptions.py`
 
@@ -320,7 +320,6 @@ The `test_data/` directory contains pre-built fixtures:
 - `directory_tiles/` — tiles in `z/x/y.png` layout
 - `directory_tiles_2/` — a second directory tileset for multi-tileset tests
 - `tiles_uncompressed.tar` — uncompressed tar
-- `tiles_compressed.tar.gz` — gzip-compressed tar
 - `tiles_nested.tar` — tar with tiles nested under `map_data/tiles/`
 
 If you add a new tileset type or new structural variant, add fixture data here and update `conftest.py`.
@@ -437,7 +436,7 @@ If you add a key, write it in the lifespan (for startup), in `rescan_tileset` (f
 
 **Where to look:**
 - Directory tiles: ETag is `W/"mtime_ns-size"` from `st.st_mtime_ns` and `st.st_size`. This changes if the file changes — intended.
-- Tar tiles: ETag is `W/"mtime-size"` from `TarInfo.mtime` and `TarInfo.size`. `TarInfo.mtime` is set when the tar is created.
+- Tar tiles: ETag is `W/"mtime-size"` from `TileEntry.mtime` and `TileEntry.size`. `mtime` is captured from the tar header when the index is built; it changes only if the tar is recreated.
 
 **Common cause:** the client isn't sending `If-None-Match`. The server only checks that header.
 
@@ -449,9 +448,7 @@ If you add a key, write it in the lifespan (for startup), in `rescan_tileset` (f
 
 **`TILE_SCAN=0` is always set for workers.** MAIN sets this before starting Uvicorn so workers never scan directories themselves. If you're running Uvicorn directly (not via `python -m app`), workers default to scanning if `TILE_SCAN` isn't set. Either set it yourself or pass `do_scan=False` to `create_app()`.
 
-**`TarInfo` objects must not be shared across threads.** The `get_tile_from_tar` method captures `offset`, `size`, and `mtime` as plain Python integers before entering `asyncio.to_thread`. Never pass a `TarInfo` into a thread; extract the scalars first.
-
-**`base_path` stripping.** If a tar has tiles at `tiles/10/512/341.png` and `base_path="tiles"`, `build_tar_index` strips the prefix so the index key is `"10/512/341.png"`. The same stripping must happen wherever you look up a tile. If you ever change the stripping logic, change it in `build_tar_index` and verify `find_tile_in_tar_index` still matches.
+**`base_path` stripping.** If a tar has tiles at `tiles/10/512/341.png` and `base_path="tiles"`, `build_tar_index` strips the prefix so the index key is `"10/512/341.png"`. If you ever change the stripping logic, change it in `build_tar_index` and verify `find_tile_in_tar_index` still matches.
 
 **`parse_tile_member_path` takes the last three components.** Given `"a/b/c/10/512/341.png"` it returns `("10", "512", "341.png")`. This means any path ending in `z/x/y.ext` where `z` and `x` are digits is treated as a tile. If your tar contains non-tile files with this structure, they'll be indexed as tiles. In practice this doesn't matter because tiles are the only image files in a tile archive.
 
