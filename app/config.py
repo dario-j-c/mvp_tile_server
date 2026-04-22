@@ -181,13 +181,13 @@ def load_tileset_config(
             try:
                 compression = detect_tar_compression(resolved_path)
 
-                # Warn about compressed tars
                 if compression in ["gzip", "bzip2", "xz"]:
-                    warnings.append(
-                        f"• Tileset '{name}': Using {compression}-compressed tar. "
-                        "This will be 5-10x slower than uncompressed. "
-                        "Consider using .tar for better performance."
+                    errors.append(
+                        f"• Tileset '{name}': Compressed tar files (.tar.gz, .tar.bz2, .tar.xz) "
+                        "are not supported. Convert to uncompressed .tar:\n"
+                        "    tar -xf archive.tar.gz && tar -cf archive.tar -C extracted ."
                     )
+                    continue
 
                 # Auto-detect base_path if not provided.
                 # auto_detect_base_path propagates tarfile.open failures, so it
