@@ -237,6 +237,8 @@ def tar_file(temp_dir):
 
 def test_build_tar_index(tar_file):
     """Test building index from tar archive"""
+    from app.utils import TileEntry
+
     member_index, zoom_levels, sample_tiles = build_tar_index(tar_file)
 
     # Should have 8 tiles (2 zooms * 2 x * 2 y)
@@ -245,9 +247,11 @@ def test_build_tar_index(tar_file):
     # Should detect zoom levels 10 and 11
     assert zoom_levels == {10, 11}
 
-    # Check specific tile exists
+    # Check specific tile exists and values are lightweight TileEntry tuples
     assert "10/0/0.png" in member_index
     assert "11/1/1.png" in member_index
+    assert isinstance(member_index["10/0/0.png"], TileEntry)
+    assert member_index["10/0/0.png"].suffix == ".png"
 
     # Sample tiles should be populated (up to _MAX_SAMPLE_TILES)
     assert isinstance(sample_tiles, list)
@@ -596,9 +600,8 @@ def test_load_config_dict_missing_source(temp_dir):
         load_tileset_config(str(config_path))
 
 
-def test_load_compressed_tar_logs_warning(temp_dir, caplog):
-    """Test that loading compressed tar logs a performance warning."""
-    # Create a gzip-compressed tar file
+def test_load_compressed_tar_raises_error(temp_dir):
+    """Test that loading a compressed tar raises a hard config error."""
     tar_path = temp_dir / "tiles.tar.gz"
     with tarfile.open(tar_path, "w:gz") as tar:
         tile_data = b"fake tile"
@@ -610,14 +613,8 @@ def test_load_compressed_tar_logs_warning(temp_dir, caplog):
     config_path = temp_dir / "config.json"
     config_path.write_text(json.dumps(config))
 
-    with caplog.at_level(logging.WARNING):
-        result = load_tileset_config(str(config_path))
-
-    assert "test_tar" in result
-    # Check warning was logged about compression
-    assert any("gzip" in record.message.lower() for record in caplog.records) or any(
-        "slower" in record.message.lower() for record in caplog.records
-    )
+    with pytest.raises(ValueError, match="not supported"):
+        load_tileset_config(str(config_path))
 
 
 # ============================================================================
@@ -645,8 +642,9 @@ async def test_tar_manager_initialize_and_close(temp_dir):
     assert tar_manager.index_status["test"]["status"] == "ready"
     assert tar_manager.index_status["test"]["tile_count"] == 1
 
-    # close_all is a no-op (no shared handles kept)
+    assert "test" in tar_manager.mmaps
     await tar_manager.close_all()
+    assert "test" not in tar_manager.mmaps
 
 
 @pytest.mark.asyncio
@@ -718,8 +716,8 @@ async def test_tar_manager_extension_probing(temp_dir):
 
 
 @pytest.mark.asyncio
-async def test_tar_manager_no_shared_handle(temp_dir):
-    """TarManager holds no shared tar handle — only an index and a source path."""
+async def test_tar_manager_uses_mmap(temp_dir):
+    """TarManager holds one mmap per tileset — no shared tar handle, no per-request FDs."""
     tar_path = temp_dir / "test.tar"
     with tarfile.open(tar_path, "w") as tar:
         tile_data = b"fake tile"
@@ -732,8 +730,13 @@ async def test_tar_manager_no_shared_handle(temp_dir):
 
     assert not hasattr(tar_manager, "tar_handles")
     assert not hasattr(tar_manager, "tileset_locks")
-    assert "test" in tar_manager.source_paths
-    assert tar_manager.source_paths["test"] == tar_path
+    assert not hasattr(tar_manager, "source_paths")
+    assert not hasattr(tar_manager, "compression_types")
+    import mmap as mmap_mod
+    assert "test" in tar_manager.mmaps
+    assert isinstance(tar_manager.mmaps["test"], mmap_mod.mmap)
+
+    await tar_manager.close_all()
 
 
 @pytest.mark.asyncio

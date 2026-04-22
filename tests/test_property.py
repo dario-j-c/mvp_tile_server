@@ -14,7 +14,6 @@ tileset_strategy = st.sampled_from(
     [
         "test_directory",
         "test_tar_uncompressed",
-        "test_tar_compressed",
         "test_tar_nested",
     ]
 )

@@ -52,7 +52,6 @@ def test_tileset_info(client, tileset_name, expected_type):
     [
         ("test_directory", 10, 0, "0.png", "directory"),
         ("test_tar_uncompressed", 10, 0, "0.png", "tar"),
-        ("test_tar_compressed", 10, 0, "0.png", "tar"),
         ("test_tar_nested", 10, 0, "0.png", "tar"),
     ],
 )

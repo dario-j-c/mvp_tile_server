@@ -39,9 +39,6 @@ def generate_test_config() -> Path:
             "test_tar_uncompressed": str(
                 (TEST_DATA_DIR / "tiles_uncompressed.tar").resolve()
             ),
-            "test_tar_compressed": str(
-                (TEST_DATA_DIR / "tiles_compressed.tar.gz").resolve()
-            ),
             "test_tar_nested": {
                 "source": str((TEST_DATA_DIR / "tiles_nested.tar").resolve()),
                 "base_path": "map_data/tiles",
