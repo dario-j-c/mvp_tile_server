@@ -54,6 +54,23 @@ def detect_tar_compression(tar_path: Path) -> str:
     return "unknown"
 
 
+def parse_tile_member_path(member_path: str) -> Optional[Tuple[str, str, str]]:
+    """
+    Parse a tar member path into (z_str, x_str, y_name) if it matches z/x/y.ext.
+
+    Uses the last three path components so it works regardless of any leading prefix
+    (e.g. "tiles/10/5/3.png" and "10/5/3.png" both return ("10", "5", "3.png")).
+
+    Returns None if the path doesn't match the expected tile structure.
+    """
+    parts = member_path.split("/")
+    if len(parts) >= 3:
+        z_str, x_str, y_name = parts[-3], parts[-2], parts[-1]
+        if z_str.isdigit() and x_str.isdigit():
+            return z_str, x_str, y_name
+    return None
+
+
 def find_tile_in_tar_index(
     tar_index: Dict[str, tarfile.TarInfo], z: int, x: int, y_name: str
 ) -> Tuple[Optional[tarfile.TarInfo], List[str]]:
