@@ -307,8 +307,6 @@ class TarManager:
             "Cache-Control": "public, max-age=86400, immutable",
             "ETag": etag,
             "Last-Modified": email.utils.formatdate(tile_entry.mtime, usegmt=True),
-            "X-Tile-Server": "event-optimized",
-            "X-Cache-Strategy": "local-event",
             "X-Tileset": tileset_name,
             "X-Source-Type": "tar",
         }

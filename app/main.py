@@ -55,6 +55,7 @@ def create_app(
     config_path: str,
     do_scan: bool = True,
     metadata_file: Optional[str] = None,
+    event_mode: bool = False,
 ) -> FastAPI:
     """
     Create and configure the FastAPI application for serving map tiles.
@@ -100,6 +101,7 @@ def create_app(
         # Startup
         logger.info("Event tile server starting with %d tilesets", len(tilesets))
 
+        server_mode = "event-optimized" if event_mode else "development"
         tar_manager = TarManager()
         tileset_metadata: dict = {}
 
@@ -239,6 +241,7 @@ def create_app(
         app.state.tilesets = tilesets
         app.state.tileset_metadata = tileset_metadata
         app.state.tar_manager = tar_manager
+        app.state.server_mode = server_mode
 
         logger.info("Event tile server ready for displays!")
         try:
@@ -607,15 +610,17 @@ def create_app(
                     },
                 )
 
+            server_mode = request.app.state.server_mode
             headers = {
                 "Cache-Control": "public, max-age=86400, immutable",
                 "ETag": etag,
                 "Last-Modified": email.utils.formatdate(st.st_mtime, usegmt=True),
-                "X-Tile-Server": "event-optimized",
-                "X-Cache-Strategy": "local-event",
+                "X-Tile-Server": server_mode,
                 "X-Tileset": tileset_name,
                 "X-Source-Type": "directory",
             }
+            if server_mode == "event-optimized":
+                headers["X-Cache-Strategy"] = "local-event"
 
             media_type = media_type_for_suffix(tile_path.suffix)
 
@@ -637,6 +642,11 @@ def create_app(
                 tile_data, media_type, headers = await tar_manager.get_tile_from_tar(
                     tileset_name, z, x, y_name, if_none_match=if_none_match
                 )
+
+                server_mode = request.app.state.server_mode
+                headers["X-Tile-Server"] = server_mode
+                if server_mode == "event-optimized":
+                    headers["X-Cache-Strategy"] = "local-event"
 
                 # Check for 304 Not Modified (tile_data is None)
                 if tile_data is None:
@@ -684,4 +694,5 @@ def get_app() -> FastAPI:
     config_path = os.getenv("CONFIG_PATH", "config.json")
     do_scan = os.getenv("TILE_SCAN", "1") != "0"
     metadata_file = os.getenv("TILE_METADATA_FILE")
-    return create_app(config_path, do_scan=do_scan, metadata_file=metadata_file)
+    event_mode = os.getenv("EVENT_MODE") == "1"
+    return create_app(config_path, do_scan=do_scan, metadata_file=metadata_file, event_mode=event_mode)

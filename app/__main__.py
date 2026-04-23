@@ -145,6 +145,7 @@ def main() -> None:
     # Export env for worker factory to consume
     os.environ["CONFIG_PATH"] = args.config
     os.environ["TILE_SCAN"] = "0"  # Workers never scan, MAIN already did
+    os.environ["EVENT_MODE"] = "1" if args.event_mode else "0"
     if metadata_file:
         os.environ["TILE_METADATA_FILE"] = metadata_file
 

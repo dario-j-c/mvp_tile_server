@@ -338,3 +338,21 @@ def test_create_app_without_scan():
         data = response.json()
         # When scanning is disabled, zoom_range uses defaults
         assert "zoom_range" in data
+
+
+def test_server_mode_header_development(client):
+    """Dev mode: X-Tile-Server is 'development', X-Cache-Strategy is absent."""
+    response = client.get("/test_directory/10/0/0.png")
+    assert response.status_code == 200
+    assert response.headers.get("X-Tile-Server") == "development"
+    assert "X-Cache-Strategy" not in response.headers
+
+
+def test_server_mode_header_event_optimized():
+    """Event mode: X-Tile-Server is 'event-optimized', X-Cache-Strategy is present."""
+    app = create_app(config_path=str(TEST_CONFIG_PATH), event_mode=True)
+    with TestClient(app) as test_client:
+        response = test_client.get("/test_directory/10/0/0.png")
+        assert response.status_code == 200
+        assert response.headers.get("X-Tile-Server") == "event-optimized"
+        assert response.headers.get("X-Cache-Strategy") == "local-event"
