@@ -29,6 +29,14 @@ logger = logging.getLogger("event_tile_server")
 _MAX_SAMPLE_TILES = 5
 
 
+def _touch_sentinel(sentinel_path: Path) -> None:
+    """Touch the reload sentinel file so other workers detect a fresh index."""
+    try:
+        sentinel_path.touch(exist_ok=True)
+    except OSError as e:
+        logger.warning("Failed to touch reload sentinel %s: %s", sentinel_path, e)
+
+
 def get_tar_cache_path(tar_path: Path) -> Path:
     """Determine where to save the .idx cache file."""
     cache_dir = os.environ.get("TAR_CACHE_DIR")
@@ -183,6 +191,13 @@ class TarManager:
         self.mmaps: Dict[str, mmap.mmap] = {}
         self._mmap_files: Dict[str, IO[bytes]] = {}
         self.index_status: Dict[str, Dict[str, Any]] = {}
+        # Sentinel-based cross-worker reload
+        self._tileset_sources: Dict[str, Tuple[Path, str]] = {}
+        self._last_loaded_cache_mtime: Dict[str, float] = {}
+        self._sentinel_path: Optional[Path] = None
+        self._sentinel_mtime: float = 0.0
+        self._sentinel_task: Optional[asyncio.Task] = None
+        self._sentinel_poll_interval: float = 2.0  # override in tests
 
     async def initialize_tileset(
         self, tileset_name: str, source_path: Path, base_path: str = ""
@@ -224,6 +239,16 @@ class TarManager:
                     "zoom_levels": zoom_levels_sorted,
                     "last_rebuilt": None,
                 }
+
+                # Record source and cache version for sentinel-triggered reloads.
+                self._tileset_sources[tileset_name] = (source_path, base_path)
+                cache_path = get_tar_cache_path(source_path)
+                try:
+                    self._last_loaded_cache_mtime[tileset_name] = (
+                        cache_path.stat().st_mtime
+                    )
+                except OSError:
+                    self._last_loaded_cache_mtime[tileset_name] = 0.0
 
                 logger.debug(
                     "Tileset '%s': indexed %d tiles from tar archive",
@@ -290,6 +315,18 @@ class TarManager:
                     old_mmap.close()
                 if old_fh:
                     old_fh.close()
+
+                # Update our own cache-mtime record before touching the sentinel so
+                # this worker's watcher skips the self-reload.
+                cache_path = get_tar_cache_path(source_path)
+                try:
+                    self._last_loaded_cache_mtime[tileset_name] = (
+                        cache_path.stat().st_mtime
+                    )
+                except OSError:
+                    pass
+                if self._sentinel_path is not None:
+                    _touch_sentinel(self._sentinel_path)
 
                 logger.info(
                     "Successfully rebuilt index for tileset '%s': %d tiles",
@@ -395,10 +432,99 @@ class TarManager:
         return tile_data, media_type, headers
 
     async def close_all(self) -> None:
-        """Close all mmap views and underlying file handles."""
+        """Close all mmap views, file handles, and the sentinel watcher task."""
+        if self._sentinel_task is not None and not self._sentinel_task.done():
+            self._sentinel_task.cancel()
+            try:
+                await self._sentinel_task
+            except asyncio.CancelledError:
+                pass
         for mmap_obj in self.mmaps.values():
             mmap_obj.close()
         for fh in self._mmap_files.values():
             fh.close()
         self.mmaps.clear()
         self._mmap_files.clear()
+
+    def set_sentinel_path(self, path: Path) -> None:
+        """Register the sentinel file path; reads its current mtime as the baseline."""
+        self._sentinel_path = path
+        try:
+            self._sentinel_mtime = path.stat().st_mtime
+        except OSError:
+            self._sentinel_mtime = 0.0
+
+    def start_sentinel_watcher(self) -> None:
+        """Start the background task that watches for cross-worker reload signals."""
+        if self._sentinel_task is None or self._sentinel_task.done():
+            self._sentinel_task = asyncio.create_task(self._watch_sentinel())
+
+    async def _watch_sentinel(self) -> None:
+        """Poll the sentinel file; reload stale indexes when its mtime advances."""
+        while True:
+            try:
+                await asyncio.sleep(self._sentinel_poll_interval)
+                if self._sentinel_path is None:
+                    continue
+                try:
+                    mtime = self._sentinel_path.stat().st_mtime
+                except OSError:
+                    continue
+                if mtime > self._sentinel_mtime:
+                    self._sentinel_mtime = mtime
+                    logger.info(
+                        "Reload sentinel changed — reloading stale tar indexes"
+                    )
+                    await self._reload_stale_indexes()
+            except asyncio.CancelledError:
+                return
+
+    async def _reload_stale_indexes(self) -> None:
+        """Reload any tileset whose .idx cache is newer than the version we loaded."""
+        async with self.rebuild_lock:
+            for name, (source_path, base_path) in self._tileset_sources.items():
+                cache_path = get_tar_cache_path(source_path)
+                try:
+                    cache_mtime = cache_path.stat().st_mtime
+                except OSError:
+                    continue
+                if cache_mtime <= self._last_loaded_cache_mtime.get(name, 0.0):
+                    continue
+
+                logger.info("Auto-reloading index for tileset '%s'...", name)
+                try:
+                    new_index, zoom_levels, _ = await asyncio.to_thread(
+                        build_tar_index, source_path, base_path
+                    )
+                    zoom_levels_sorted = sorted(zoom_levels)
+                    new_fh: IO[bytes] = open(source_path, "rb")
+                    new_mmap = mmap.mmap(new_fh.fileno(), 0, access=mmap.ACCESS_READ)
+
+                    old_mmap = self.mmaps.get(name)
+                    old_fh = self._mmap_files.get(name)
+
+                    self.tar_indexes[name] = new_index
+                    self.mmaps[name] = new_mmap
+                    self._mmap_files[name] = new_fh
+                    self.index_status[name] = {
+                        "status": "ready",
+                        "tile_count": len(new_index),
+                        "zoom_levels": zoom_levels_sorted,
+                        "last_rebuilt": datetime.datetime.now().isoformat(),
+                    }
+                    self._last_loaded_cache_mtime[name] = cache_mtime
+
+                    if old_mmap:
+                        old_mmap.close()
+                    if old_fh:
+                        old_fh.close()
+
+                    logger.info(
+                        "Auto-reloaded index for tileset '%s': %d tiles",
+                        name,
+                        len(new_index),
+                    )
+                except Exception as e:
+                    logger.error(
+                        "Failed to auto-reload index for tileset '%s': %s", name, e
+                    )

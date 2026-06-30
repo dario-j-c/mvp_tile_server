@@ -19,9 +19,11 @@ Usage:
 import asyncio
 import datetime
 import email.utils
+import hashlib
 import json
 import logging
 import os
+import tempfile
 from contextlib import asynccontextmanager
 from io import BytesIO
 from pathlib import Path
@@ -49,6 +51,15 @@ from app.tar_manager import TarManager
 from app.utils import find_tile_path, media_type_for_suffix
 
 logger = logging.getLogger("event_tile_server")
+
+
+def _compute_sentinel_path(config_path: str) -> Path:
+    """Return a stable per-config sentinel path, writable by all workers."""
+    config_hash = hashlib.md5(config_path.encode()).hexdigest()[:8]
+    cache_dir = os.environ.get("TAR_CACHE_DIR")
+    if cache_dir and Path(cache_dir).is_dir():
+        return Path(cache_dir) / f".tar_reload_{config_hash}"
+    return Path(tempfile.gettempdir()) / f".tar_reload_{config_hash}"
 
 
 def create_app(
@@ -166,6 +177,14 @@ def create_app(
                     "max_zoom": DEFAULT_MAX_Z,
                     "scanned_at": datetime.datetime.now().isoformat(),
                 }
+
+        # Start cross-worker reload watcher so other workers pick up a fresh .idx
+        # within ~2 seconds of any POST /admin/rebuild call.
+        if any(info["source_type"] == "tar" for info in tilesets.values()):
+            sentinel_path = _compute_sentinel_path(config_path)
+            tar_manager.set_sentinel_path(sentinel_path)
+            tar_manager.start_sentinel_watcher()
+            logger.debug("Cross-worker reload sentinel: %s", sentinel_path)
 
         if pre_scanned_metadata:
             # MAIN process pre-scanned directory tilesets; merge into tileset_metadata
