@@ -56,10 +56,10 @@ def detect_tar_compression(tar_path: Path) -> str:
 class TileEntry(NamedTuple):
     """Lightweight index entry replacing a full TarInfo object."""
 
-    offset: int    # TarInfo.offset_data — absolute byte position of tile data
-    size: int      # byte length of the tile
-    mtime: float   # modification time used for ETag and Last-Modified
-    suffix: str    # file extension including dot, e.g. ".png"
+    offset: int  # TarInfo.offset_data — absolute byte position of tile data
+    size: int  # byte length of the tile
+    mtime: float  # modification time used for ETag and Last-Modified
+    suffix: str  # file extension including dot, e.g. ".png"
 
 
 def parse_tile_member_path(member_path: str) -> Optional[Tuple[str, str, str]]:

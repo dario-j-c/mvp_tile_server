@@ -115,7 +115,11 @@ def create_app(
             base_path: str = tileset_info.get("base_path", "")
 
             try:
-                tile_count, sample_tiles, zoom_levels = await tar_manager.initialize_tileset(
+                (
+                    tile_count,
+                    sample_tiles,
+                    zoom_levels,
+                ) = await tar_manager.initialize_tileset(
                     tileset_name, source_path, base_path
                 )
                 min_zoom = min(zoom_levels) if zoom_levels else DEFAULT_MIN_Z
@@ -135,12 +139,16 @@ def create_app(
                 if zoom_levels:
                     logger.info(
                         "Tileset '%s': %d tiles, zoom %d-%d",
-                        tileset_name, tile_count, min_zoom, max_zoom,
+                        tileset_name,
+                        tile_count,
+                        min_zoom,
+                        max_zoom,
                     )
                 else:
                     logger.info(
                         "Tileset '%s': %d tiles, no zoom structure detected",
-                        tileset_name, tile_count,
+                        tileset_name,
+                        tile_count,
                     )
             except Exception as e:
                 logger.error(
@@ -179,8 +187,12 @@ def create_app(
                     logger.info("Scanning directory tileset '%s'...", tileset_name)
                     try:
                         (
-                            tile_count, sample_tiles, zoom_levels,
-                            min_zoom, max_zoom, scan_complete,
+                            tile_count,
+                            sample_tiles,
+                            zoom_levels,
+                            min_zoom,
+                            max_zoom,
+                            scan_complete,
                         ) = await asyncio.to_thread(
                             scan_tiles,
                             source_path=source_path,
@@ -192,7 +204,9 @@ def create_app(
                             "base_path": "",
                             "tile_count": tile_count,
                             "tile_count_complete": scan_complete,
-                            "sample_tiles": [f"/{tileset_name}/{t}" for t in sample_tiles],
+                            "sample_tiles": [
+                                f"/{tileset_name}/{t}" for t in sample_tiles
+                            ],
                             "zoom_levels": zoom_levels,
                             "min_zoom": min_zoom,
                             "max_zoom": max_zoom,
@@ -201,12 +215,16 @@ def create_app(
                         if zoom_levels:
                             logger.info(
                                 "Tileset '%s': %d tiles, zoom %d-%d",
-                                tileset_name, tile_count, min_zoom, max_zoom,
+                                tileset_name,
+                                tile_count,
+                                min_zoom,
+                                max_zoom,
                             )
                         else:
                             logger.info(
                                 "Tileset '%s': %d tiles, no zoom structure detected",
-                                tileset_name, tile_count,
+                                tileset_name,
+                                tile_count,
                             )
                     except Exception as e:
                         logger.error(
@@ -464,8 +482,12 @@ def create_app(
             base_path: str = tileset_info.get("base_path", "")
             try:
                 (
-                    tile_count, raw_samples, zoom_levels,
-                    min_zoom, max_zoom, scan_complete,
+                    tile_count,
+                    raw_samples,
+                    zoom_levels,
+                    min_zoom,
+                    max_zoom,
+                    scan_complete,
                 ) = await asyncio.to_thread(
                     scan_tiles,
                     source_path=source_path,
@@ -477,15 +499,17 @@ def create_app(
                 raise HTTPException(status_code=500, detail=f"Rescan failed: {str(e)}")
             sample_tiles = [f"/{tileset_name}/{t}" for t in raw_samples]
 
-        request.app.state.tileset_metadata[tileset_name].update({
-            "tile_count": tile_count,
-            "tile_count_complete": scan_complete,
-            "sample_tiles": sample_tiles,
-            "zoom_levels": zoom_levels,
-            "min_zoom": min_zoom,
-            "max_zoom": max_zoom,
-            "scanned_at": scanned_at,
-        })
+        request.app.state.tileset_metadata[tileset_name].update(
+            {
+                "tile_count": tile_count,
+                "tile_count_complete": scan_complete,
+                "sample_tiles": sample_tiles,
+                "zoom_levels": zoom_levels,
+                "min_zoom": min_zoom,
+                "max_zoom": max_zoom,
+                "scanned_at": scanned_at,
+            }
+        )
 
         return {
             "status": "success",
@@ -695,4 +719,6 @@ def get_app() -> FastAPI:
     do_scan = os.getenv("TILE_SCAN", "1") != "0"
     metadata_file = os.getenv("TILE_METADATA_FILE")
     event_mode = os.getenv("EVENT_MODE") == "1"
-    return create_app(config_path, do_scan=do_scan, metadata_file=metadata_file, event_mode=event_mode)
+    return create_app(
+        config_path, do_scan=do_scan, metadata_file=metadata_file, event_mode=event_mode
+    )

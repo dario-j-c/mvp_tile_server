@@ -97,10 +97,19 @@ def test_custom_config_with_port_and_bind():
 
 
 def test_all_flags_together():
-    args = _parse([
-        "my.json", "-p", "9090", "-b", "127.0.0.1",
-        "--workers", "2", "--event-mode", "--no-scan",
-    ])
+    args = _parse(
+        [
+            "my.json",
+            "-p",
+            "9090",
+            "-b",
+            "127.0.0.1",
+            "--workers",
+            "2",
+            "--event-mode",
+            "--no-scan",
+        ]
+    )
     assert args.config == "my.json"
     assert args.port == 9090
     assert args.bind == "127.0.0.1"
@@ -126,10 +135,19 @@ def test_event_mode_no_scan_workers():
 
 def test_config_with_all_optional_flags():
     """Positional config combined with every optional flag."""
-    args = _parse([
-        "prod.json", "--port", "80", "--bind", "0.0.0.0",
-        "--workers", "16", "--event-mode", "--no-scan",
-    ])
+    args = _parse(
+        [
+            "prod.json",
+            "--port",
+            "80",
+            "--bind",
+            "0.0.0.0",
+            "--workers",
+            "16",
+            "--event-mode",
+            "--no-scan",
+        ]
+    )
     assert args.config == "prod.json"
     assert args.port == 80
     assert args.workers == 16
@@ -161,7 +179,9 @@ def test_main_tempfile_failure_continues_without_metadata_file(caplog):
     with patch("sys.argv", ["app", str(TEST_CONFIG_PATH)]):
         with patch("uvicorn.run"):
             with patch("app.__main__.scan_all_tilesets", return_value={}):
-                with patch("tempfile.mkstemp", side_effect=OSError("Read-only file system")):
+                with patch(
+                    "tempfile.mkstemp", side_effect=OSError("Read-only file system")
+                ):
                     with patch.dict("os.environ", {}, clear=False):
                         with caplog.at_level(logging.WARNING):
                             main()  # must not raise or sys.exit
@@ -171,7 +191,8 @@ def test_main_tempfile_failure_continues_without_metadata_file(caplog):
 
                         # A warning must be logged so the operator knows what happened
                         assert any(
-                            "temp file" in r.message.lower() or "metadata" in r.message.lower()
+                            "temp file" in r.message.lower()
+                            or "metadata" in r.message.lower()
                             for r in caplog.records
                         )
 
@@ -235,7 +256,9 @@ def test_main_default_scan_passes_only_directory_tilesets_to_scan():
                     main()
                     mock_scan.assert_called_once()
                     scanned = mock_scan.call_args[0][0]
-                    assert all(v["source_type"] == "directory" for v in scanned.values())
+                    assert all(
+                        v["source_type"] == "directory" for v in scanned.values()
+                    )
 
 
 def test_main_default_scan_sets_metadata_file_env():
@@ -300,7 +323,9 @@ def test_main_normal_mode_sets_info_log_level():
 
 
 def test_main_custom_port_passed_to_uvicorn():
-    with patch("sys.argv", ["app", str(TEST_CONFIG_PATH), "--port", "9090", "--no-scan"]):
+    with patch(
+        "sys.argv", ["app", str(TEST_CONFIG_PATH), "--port", "9090", "--no-scan"]
+    ):
         with patch("uvicorn.run") as mock_run:
             with patch.dict("os.environ", {}, clear=False):
                 main()
@@ -308,7 +333,9 @@ def test_main_custom_port_passed_to_uvicorn():
 
 
 def test_main_custom_bind_passed_to_uvicorn():
-    with patch("sys.argv", ["app", str(TEST_CONFIG_PATH), "--bind", "127.0.0.1", "--no-scan"]):
+    with patch(
+        "sys.argv", ["app", str(TEST_CONFIG_PATH), "--bind", "127.0.0.1", "--no-scan"]
+    ):
         with patch("uvicorn.run") as mock_run:
             with patch.dict("os.environ", {}, clear=False):
                 main()
@@ -316,7 +343,9 @@ def test_main_custom_bind_passed_to_uvicorn():
 
 
 def test_main_custom_workers_passed_to_uvicorn():
-    with patch("sys.argv", ["app", str(TEST_CONFIG_PATH), "--workers", "8", "--no-scan"]):
+    with patch(
+        "sys.argv", ["app", str(TEST_CONFIG_PATH), "--workers", "8", "--no-scan"]
+    ):
         with patch("uvicorn.run") as mock_run:
             with patch.dict("os.environ", {}, clear=False):
                 main()

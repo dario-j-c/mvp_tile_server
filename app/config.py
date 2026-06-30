@@ -377,7 +377,14 @@ def scan_tiles(
         max_zoom = DEFAULT_MAX_Z
         zoom_levels_sorted = []
 
-    return tile_count, sample_tiles, zoom_levels_sorted, min_zoom, max_zoom, not timed_out
+    return (
+        tile_count,
+        sample_tiles,
+        zoom_levels_sorted,
+        min_zoom,
+        max_zoom,
+        not timed_out,
+    )
 
 
 def scan_all_tilesets(
@@ -407,10 +414,12 @@ def scan_all_tilesets(
         )
 
         try:
-            tile_count, sample_tiles, zoom_levels, min_zoom, max_zoom, scan_complete = scan_tiles(
-                source_path=source_path,
-                source_type=source_type,
-                base_path=base_path,
+            tile_count, sample_tiles, zoom_levels, min_zoom, max_zoom, scan_complete = (
+                scan_tiles(
+                    source_path=source_path,
+                    source_type=source_type,
+                    base_path=base_path,
+                )
             )
 
             # Add tileset name to sample tile paths
