@@ -33,7 +33,14 @@ def get_tar_cache_path(tar_path: Path) -> Path:
     """Determine where to save the .idx cache file."""
     cache_dir = os.environ.get("TAR_CACHE_DIR")
     if cache_dir:
-        return Path(cache_dir) / f"{tar_path.name}.idx"
+        cache_dir_path = Path(cache_dir)
+        if not cache_dir_path.is_dir():
+            logger.warning(
+                "TAR_CACHE_DIR '%s' does not exist; falling back to default cache location",
+                cache_dir,
+            )
+        else:
+            return cache_dir_path / f"{tar_path.name}.idx"
 
     default_path = tar_path.with_suffix(tar_path.suffix + ".idx")
     try:
@@ -68,7 +75,7 @@ def build_unified_tar_index(tar_path: Path) -> Dict[str, TileEntry]:
         )
     except Exception as e:
         logger.error("Error building unified tar index for %s: %s", tar_path, e)
-        raise ValueError(f"Failed to build unified tar index: {e}")
+        raise ValueError(f"Failed to build unified tar index: {e}") from e
     return unified_index
 
 
@@ -118,7 +125,9 @@ def load_or_build_tar_index(
                     unified_index = pickle.load(f)
                 return unified_index
         except Exception as e:
-            logger.warning("Error checking/loading tar index cache: %s", e)
+            logger.warning(
+                "Error checking/loading tar index cache for %s: %s", tar_path.name, e
+            )
 
     logger.info("Building unified tar index for %s...", tar_path.name)
     unified_index = build_unified_tar_index(tar_path)
