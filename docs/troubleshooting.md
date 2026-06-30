@@ -45,10 +45,10 @@ Found 2 configuration errors:
 Startup scans directory tilesets to determine tile count and zoom bounds. For large directory trees this can take a while.
 
 **Options:**
-- `--no-scan` — skips all scanning; zoom bounds default to 1–25. Tile requests outside the actual zoom range will return `404 INVALID_ZOOM_LEVEL` if the scanned bounds are used elsewhere; without scanning, all zoom values 1–25 are accepted and requests for missing tiles return `404 TILE_NOT_FOUND` instead.
-- Use tar archives — tar metadata is derived from the index at startup (header-only read, no tile data), which is much faster than walking a directory tree for large tilesets. Tar serving is also faster at request time, so this is the right default for event deployments regardless of startup speed.
+- `--no-scan` — skips both directory scanning and tar index pre-building. Zoom bounds default to 1–25. Without scanning, all zoom values 1–25 are accepted and requests for missing tiles return `404 TILE_NOT_FOUND` instead of `404 INVALID_ZOOM_LEVEL`.
+- Use tar archives — on first run, the MAIN process reads all tar member headers (no tile data) and saves a `.idx` cache file. Subsequent starts load the cache instead of re-parsing the archive, making startup nearly instant for already-indexed tars. Tar serving is also faster at request time (in-memory mmap slice vs disk reads), so this is the right default for event deployments regardless of startup speed.
 
-Tar index building is proportional to the number of files, not the file size. ~1 million tiles in an uncompressed tar typically indexes in 15–60 seconds on SSD.
+Tar index building on first run is proportional to the number of files, not the file size. ~1 million tiles in an uncompressed tar typically indexes in 15–60 seconds on SSD. After the `.idx` is written, subsequent starts skip this entirely.
 
 ---
 
@@ -137,7 +137,21 @@ The in-memory index still points to the old file. Trigger a rebuild:
 POST /admin/rebuild/{tileset_name}
 ```
 
-This re-reads the tar from disk, rebuilds the index, and swaps it atomically. Requests in-flight during the rebuild may receive 503; they will succeed once the rebuild completes.
+This re-reads the tar from disk, rebuilds the index (bypassing and overwriting the `.idx` cache), and swaps it atomically. Requests in-flight during the rebuild may receive 503; they will succeed once the rebuild completes.
+
+If the server is restarted rather than rebuilt, the `.idx` cache is automatically invalidated by mtime comparison: a cache older than the tar file is discarded and rebuilt.
+
+---
+
+### `.idx` cache file location / permissions
+
+By default the `.idx` file is written alongside the tar (e.g. `tiles.tar` → `tiles.tar.idx`). If the tar's directory is not writable, the cache falls back to the OS temp directory. You can override this:
+
+```bash
+export TAR_CACHE_DIR=/path/to/writable/cache/dir
+```
+
+If a `.idx` file is from an incompatible Python version or is corrupted, the server logs a warning and falls back to parsing the tar archive directly.
 
 ---
 

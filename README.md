@@ -110,12 +110,14 @@ mvp_tile_server/
 │   └── .env                # Your settings (git-ignored)
 ├── docs/
 │   ├── usage.md            # Full CLI and API reference
-│   └── troubleshooting.md  # Diagnosis and fixes
+│   ├── troubleshooting.md  # Diagnosis and fixes
+│   └── dev-guide.md        # Codebase walkthrough for contributors
 ├── tests/
 │   ├── conftest.py
 │   ├── test_integration.py
 │   ├── test_unit.py
-│   └── test_property.py
+│   ├── test_property.py
+│   └── test_tar_cache.py
 ├── docker-compose.yml
 ├── Dockerfile
 └── inspect_tar.py          # Tar structure inspection utility

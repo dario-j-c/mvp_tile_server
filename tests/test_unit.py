@@ -273,7 +273,9 @@ def test_build_tar_index_with_base_path(temp_dir):
         tile_info.size = len(tile_data)
         tar.addfile(tile_info, BytesIO(tile_data))
 
-    member_index, zoom_levels, sample_tiles = build_tar_index(tar_nested, base_path="tiles")
+    member_index, zoom_levels, sample_tiles = build_tar_index(
+        tar_nested, base_path="tiles"
+    )
 
     # Should find the tile with normalized path
     assert "10/0/0.png" in member_index
@@ -633,7 +635,9 @@ async def test_tar_manager_initialize_and_close(temp_dir):
         tar.addfile(tile_info, BytesIO(tile_data))
 
     tar_manager = TarManager()
-    tile_count, sample_tiles, zoom_levels = await tar_manager.initialize_tileset("test", tar_path)
+    tile_count, sample_tiles, zoom_levels = await tar_manager.initialize_tileset(
+        "test", tar_path
+    )
 
     assert tile_count == 1
     assert sample_tiles == ["10/0/0.png"]
@@ -733,6 +737,7 @@ async def test_tar_manager_uses_mmap(temp_dir):
     assert not hasattr(tar_manager, "source_paths")
     assert not hasattr(tar_manager, "compression_types")
     import mmap as mmap_mod
+
     assert "test" in tar_manager.mmaps
     assert isinstance(tar_manager.mmaps["test"], mmap_mod.mmap)
 
@@ -754,10 +759,7 @@ async def test_tar_manager_concurrent_extraction(temp_dir):
     await tar_manager.initialize_tileset("test", tar_path)
 
     # Fire all tile requests concurrently
-    tasks = [
-        tar_manager.get_tile_from_tar("test", 10, i, "0.png")
-        for i in range(10)
-    ]
+    tasks = [tar_manager.get_tile_from_tar("test", 10, i, "0.png") for i in range(10)]
     results = await asyncio.gather(*tasks)
 
     for i, (tile_data, media_type, _) in enumerate(results):
@@ -857,7 +859,6 @@ def test_scan_tiles_directory_zoom_discovery_survives_timeout(temp_dir):
 
 def test_scan_tiles_directory_timeout_logs_warning(temp_dir, caplog):
     """Timeout inside tile counting propagates out and logs a warning."""
-    import logging
 
     for z in [1, 2]:
         for x in range(5):
@@ -867,7 +868,9 @@ def test_scan_tiles_directory_timeout_logs_warning(temp_dir, caplog):
                 (tile_dir / f"{y}.png").touch()
 
     with caplog.at_level(logging.WARNING):
-        _, _, zoom_levels, _, _, _ = scan_tiles(temp_dir, "directory", timeout_seconds=0)
+        _, _, zoom_levels, _, _, _ = scan_tiles(
+            temp_dir, "directory", timeout_seconds=0
+        )
 
     assert set(zoom_levels) == {1, 2}
     assert any("timeout" in r.message.lower() for r in caplog.records)
@@ -961,7 +964,9 @@ def test_scan_tiles_tar_timeout(temp_dir):
 
 def test_scan_tiles_empty_directory(temp_dir):
     """Empty directory returns zero counts and empty zoom levels."""
-    tile_count, samples, zoom_levels, min_z, max_z, complete = scan_tiles(temp_dir, "directory")
+    tile_count, samples, zoom_levels, min_z, max_z, complete = scan_tiles(
+        temp_dir, "directory"
+    )
 
     assert tile_count == 0
     assert samples == []
@@ -972,10 +977,12 @@ def test_scan_tiles_empty_directory(temp_dir):
 def test_scan_tiles_empty_tar(temp_dir):
     """Empty tar returns zero counts and empty zoom levels."""
     tar_path = temp_dir / "tiles.tar"
-    with tarfile.open(tar_path, "w") as tar:
+    with tarfile.open(tar_path, "w"):
         pass  # empty archive
 
-    tile_count, samples, zoom_levels, min_z, max_z, complete = scan_tiles(tar_path, "tar")
+    tile_count, samples, zoom_levels, min_z, max_z, complete = scan_tiles(
+        tar_path, "tar"
+    )
 
     assert tile_count == 0
     assert samples == []

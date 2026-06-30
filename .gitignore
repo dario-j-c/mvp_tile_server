@@ -33,3 +33,7 @@ env/.env
 tiletest.html
 test_data/test_config.json
 config/config.json
+
+# Tar index cache files
+*.idx
+*.tar.idx

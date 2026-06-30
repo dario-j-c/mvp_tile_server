@@ -16,10 +16,12 @@ import logging
 import os
 import sys
 import tempfile
+from pathlib import Path
 
 import uvicorn
 
 from app.config import load_tileset_config, scan_all_tilesets
+from app.tar_manager import load_or_build_tar_index
 
 logger = logging.getLogger("event_tile_server")
 
@@ -115,20 +117,26 @@ def main() -> None:
         print(f"\nUnexpected error loading configuration: {e}")
         sys.exit(1)
 
-    # Pre-scan directory tilesets in MAIN process (once, not per-worker).
-    # Tar tilesets are skipped here — workers derive their metadata for free
-    # from build_tar_index during initialize_tileset, with no extra I/O.
+    # Pre-scan directory tilesets and build unified tar indexes in MAIN process.
+    # By building tar indexes here, all workers can instantly load the cached .idx
+    # files instead of parsing the tar archives redundantly.
     metadata_file = None
     if not args.no_scan:
         directory_tilesets = {
-            name: info for name, info in tilesets.items()
+            name: info
+            for name, info in tilesets.items()
             if info["source_type"] == "directory"
         }
         if directory_tilesets:
-            logger.info("Scanning %d directory tileset(s) for metadata...", len(directory_tilesets))
+            logger.info(
+                "Scanning %d directory tileset(s) for metadata...",
+                len(directory_tilesets),
+            )
             dir_metadata = scan_all_tilesets(directory_tilesets)
             try:
-                fd, metadata_file = tempfile.mkstemp(suffix=".json", prefix="tile_metadata_")
+                fd, metadata_file = tempfile.mkstemp(
+                    suffix=".json", prefix="tile_metadata_"
+                )
                 with os.fdopen(fd, "w") as f:
                     json.dump(dir_metadata, f)
                 logger.info("Scan complete. Metadata saved for workers.")
@@ -141,6 +149,28 @@ def main() -> None:
                 metadata_file = None
         else:
             logger.info("No directory tilesets to pre-scan.")
+
+        # Build tar indexes
+        tar_tilesets = {
+            name: info
+            for name, info in tilesets.items()
+            if info["source_type"] == "tar"
+        }
+        if tar_tilesets:
+            unique_tars = set(info["source_path"] for info in tar_tilesets.values())
+            logger.info(
+                "Building/verifying unified cache for %d tar archive(s)...",
+                len(unique_tars),
+            )
+            for tar_path in unique_tars:
+                try:
+                    load_or_build_tar_index(Path(tar_path))
+                except Exception as e:
+                    logger.warning(
+                        "Failed to pre-build tar index for %s: %s", tar_path, e
+                    )
+        else:
+            logger.debug("No tar tilesets to pre-build.")
 
     # Export env for worker factory to consume
     os.environ["CONFIG_PATH"] = args.config

@@ -26,7 +26,7 @@ This is a FastAPI tile server. It reads pre-built map tile files and serves them
 
 Tiles are addressed by three integers — zoom level `z`, column `x`, row `y` — and fetched at URLs like `/osm/10/512/341.png`. The server supports two storage backends:
 
-- **Tar tilesets** — the default for event deployments. All tiles are packed into a single uncompressed `.tar` file. At startup each worker builds an in-memory index (one `TileEntry` per tile recording the byte offset, size, mtime, and extension), then memory-maps the file. Tile requests are served by a single in-memory slice — no filesystem calls at request time.
+- **Tar tilesets** — the default for event deployments. All tiles are packed into a single uncompressed `.tar` file. At startup each worker loads a pre-built in-memory index (one `TileEntry` per tile recording the byte offset, size, mtime, and extension) from a `.idx` cache file written by the MAIN process, then memory-maps the file. Tile requests are served by a single in-memory slice — no filesystem calls at request time.
 - **Directory tilesets** — tiles stored as files in a `z/x/y.ext` directory tree. Each request requires 1–5 `stat` calls for extension probing plus an async file read. Use this when tiles need to be updated on disk without a server restart; otherwise prefer tar.
 
 Multiple independent tilesets can be configured simultaneously, mixing types. The server is tuned for local deployments (events, installations) where restarts are disruptive.
@@ -76,11 +76,13 @@ When you run `python -m app config.json --workers 4`, two distinct roles exist:
 
 2. **Worker processes** (Uvicorn forks) — each worker calls `get_app()` in `app/main.py`, which calls `create_app(...)` which runs the FastAPI `lifespan` context. Workers do the actual request serving; MAIN does not serve requests.
 
-### Why scan in MAIN instead of each worker?
+### Why pre-process in MAIN instead of each worker?
 
-If a directory has 500,000 tiles, walking the filesystem takes 30–120 seconds. With 4 workers, doing it 4 times wastes 3x that time. MAIN scans once, writes the result to a temp file, sets `TILE_METADATA_FILE` in the environment, and workers read it instead.
+MAIN does two things before forking workers, both to avoid redundant work:
 
-**This only applies to directory tilesets.** Tar tilesets don't need this: each worker reads the tar's member headers (no tile data) to build its own in-memory index. This is fast even at scale (a million tiles ~15–60 seconds), and there's no benefit to sharing it between workers since each worker needs its own in-memory data structure anyway.
+**Directory tilesets:** walking a large filesystem takes 30–120 seconds. With 4 workers, doing it 4 times wastes 3x that time. MAIN scans once, writes the result to a temp JSON file, sets `TILE_METADATA_FILE`, and workers read it instead.
+
+**Tar tilesets:** MAIN builds a unified index for each unique tar archive (reads all member headers; no tile data) and saves it as a pickled `.idx` file alongside the tar (or in `TAR_CACHE_DIR`). Workers load that file via `load_or_build_tar_index()` rather than re-parsing the archive headers. For large archives (~1 million tiles, 15–60 seconds to parse) this is a material saving per worker. If the cache is missing or older than the tar, a worker falls back to parsing the archive directly and writes a fresh cache.
 
 ### The full sequence
 
@@ -89,9 +91,14 @@ python -m app config.json              (MAIN process starts)
   │
   ├─ load_tileset_config()             Validate JSON, resolve paths, detect tar vs dir
   │
-  ├─ [if directory tilesets and not --no-scan]
-  │    scan_all_tilesets()             Walk filesystem, count tiles, find zoom bounds
-  │    write to tempfile               JSON blob, path stored in TILE_METADATA_FILE env var
+  ├─ [if not --no-scan]
+  │    ├─ [if directory tilesets]
+  │    │    scan_all_tilesets()        Walk filesystem, count tiles, find zoom bounds
+  │    │    write to tempfile          JSON blob, path stored in TILE_METADATA_FILE env var
+  │    │
+  │    └─ [if tar tilesets]
+  │         load_or_build_tar_index()  Build unified index for each unique tar;
+  │                                    save as .idx alongside tar (or in TAR_CACHE_DIR)
   │
   ├─ set env vars:
   │    CONFIG_PATH, TILE_SCAN=0, TILE_METADATA_FILE
@@ -103,8 +110,11 @@ python -m app config.json              (MAIN process starts)
                  └─ lifespan()
                       ├─ [for each tar tileset]
                       │    tar_manager.initialize_tileset()
-                      │      └─ build_tar_index()  Read tar headers, build index dict
-                      │                             Returns (tile_count, samples, zooms)
+                      │      └─ build_tar_index()
+                      │           └─ load_or_build_tar_index()  Load .idx cache (fast) or
+                      │                                          parse tar headers (fallback)
+                      │           └─ filter_index_for_tileset() Apply base_path, build
+                      │                                          z/x/y.ext → TileEntry map
                       │    Store metadata in tileset_metadata[name]
                       │
                       ├─ [if pre-scanned metadata file exists]
@@ -155,7 +165,7 @@ This is the most non-obvious part of the system and the most performance-sensiti
 
 ### What the index is
 
-`build_tar_index()` in `tar_manager.py` opens the tar file and iterates every member. For each member that matches the `z/x/y.ext` structure, it records a mapping:
+`build_unified_tar_index()` opens the tar file and iterates every member, building a dict keyed by the raw archive path:
 
 ```
 "10/512/341.png"  →  TileEntry(offset=8192, size=4096, mtime=1705312200.0, suffix=".png")
@@ -164,6 +174,17 @@ This is the most non-obvious part of the system and the most performance-sensiti
 `TileEntry` is a `NamedTuple` of four scalars — the only values needed for serving. `offset` is the absolute byte position in the raw file where the tile's data begins (`TarInfo.offset_data`); `size` is how many bytes to read.
 
 Full `TarInfo` objects are not kept: they hold uid, gid, linkname, and dozens of other fields that are irrelevant after indexing and would multiply RAM usage significantly for large tilesets.
+
+`filter_index_for_tileset()` then takes that unified index and builds the tile-serving view: strips the `base_path` prefix (if any), parses each remaining path as `z/x/y.ext` using `parse_tile_member_path`, and returns `(member_index, zoom_levels_set, sample_tiles_list)`. Non-tile members are silently skipped.
+
+### The cache layer
+
+Iterating tar headers is proportional to the number of files (~15–60 seconds for a million tiles on SSD). With multiple workers, each would parse the same archive redundantly. Instead:
+
+1. MAIN calls `load_or_build_tar_index()` once per unique tar path.
+2. `load_or_build_tar_index()` calls `build_unified_tar_index()` and pickles the result to a `.idx` file alongside the tar (e.g. `tiles.tar.idx`). Set `TAR_CACHE_DIR` to write caches elsewhere.
+3. Workers call `build_tar_index()` → `load_or_build_tar_index()`, which reads and unpickles the `.idx` file. Cache validity is determined by mtime comparison: if the `.idx` is newer than the tar, it's valid.
+4. On `POST /admin/rebuild`, `force_rebuild=True` bypasses the cache read, re-parses the archive, and overwrites the `.idx` file.
 
 ### How per-request extraction works
 
@@ -258,11 +279,19 @@ Two public responsibilities:
 
 ### `app/tar_manager.py`
 
-**`build_tar_index(tar_path, base_path)`** — standalone function. Opens the tar and builds the member index in one pass, simultaneously collecting zoom levels and sample tiles. Each index entry is a `TileEntry(offset, size, mtime, suffix)`. Returns `(member_index, zoom_levels_set, sample_tiles_list)`. Called by `TarManager.initialize_tileset` and `TarManager.rebuild_index`.
+**`get_tar_cache_path(tar_path)`** — returns the path where the `.idx` cache file will be written. Checks `TAR_CACHE_DIR` env var first, then tries alongside the tar file, then falls back to the OS temp directory.
+
+**`build_unified_tar_index(tar_path)`** — opens the tar and builds a raw index of every file member, keyed by the member's full archive path. This is the slow step (one header read per member); subsequent calls load from cache instead.
+
+**`filter_index_for_tileset(unified_index, base_path)`** — extracts the tile-serving view from the unified index: strips the `base_path` prefix, parses each remaining path as `z/x/y.ext`, and returns `(member_index, zoom_levels_set, sample_tiles_list)`. This is where base_path stripping and tile-key building happen.
+
+**`load_or_build_tar_index(tar_path, force_rebuild)`** — cache layer. Loads the pickled unified index from the `.idx` file if it exists and is newer than the tar. Otherwise calls `build_unified_tar_index()` and saves the result. `force_rebuild=True` bypasses the cache read and overwrites the cache file.
+
+**`build_tar_index(tar_path, base_path, force_rebuild)`** — thin wrapper: calls `load_or_build_tar_index` then `filter_index_for_tileset`. This is the entry point used by `TarManager`.
 
 **`TarManager`** — the class that owns all tar state for a worker.
-- `initialize_tileset()` — called once per tar tileset at startup; builds the index, opens the file, creates the mmap, and returns `(tile_count, sample_tiles, zoom_levels)`.
-- `rebuild_index()` — called by the rebuild admin endpoint; builds a new index and mmap, swaps them atomically, then closes the old pair.
+- `initialize_tileset()` — called once per tar tileset at startup; calls `build_tar_index` (which loads from cache), opens the file, creates the mmap, and returns `(tile_count, sample_tiles, zoom_levels)`.
+- `rebuild_index()` — called by the rebuild admin endpoint; calls `build_tar_index` with `force_rebuild=True` (bypasses and rewrites the cache), builds a new mmap, swaps them atomically, then closes the old pair.
 - `get_tile_from_tar()` — called per tile request; looks up the `TileEntry` in the index and slices the bytes from the mmap.
 - `close_all()` — closes all mmap views and underlying file handles; called on worker shutdown.
 
@@ -289,7 +318,7 @@ Small, pure functions shared across modules:
 
 - `is_tar_file(path)` — extension-based check; does not open the file
 - `detect_tar_compression(tar_path)` — returns `"uncompressed"`, `"gzip"`, `"bzip2"`, `"xz"`, or `"unknown"` from the extension
-- `parse_tile_member_path(member_path)` — given a string like `"data/tiles/10/512/341.png"`, returns `("10", "512", "341.png")` or `None`. Used in both `build_tar_index` and `scan_tiles`.
+- `parse_tile_member_path(member_path)` — given a string like `"data/tiles/10/512/341.png"`, returns `("10", "512", "341.png")` or `None`. Used in both `filter_index_for_tileset` and `scan_tiles`.
 - `find_tile_in_tar_index(tar_index, z, x, y_name)` — looks up a tile in the index, probing alternate extensions if the exact one isn't found
 - `find_tile_path(base_dir, z, x, y_name)` — same probing logic but for filesystem directories
 - `media_type_for_suffix(suffix)` — `.png` → `"image/png"`, etc.
@@ -313,6 +342,8 @@ uv run pytest tests/ -v
 **`tests/test_unit.py`** — unit-level tests for `build_tar_index`, `TarManager`, `scan_tiles`, `load_tileset_config`, coordinate parsing, and all the utility functions.
 
 **`tests/test_property.py`** — Hypothesis-driven property tests. Generates random inputs to verify that functions don't crash unexpectedly and that certain invariants hold.
+
+**`tests/test_tar_cache.py`** — tests for the tar index caching layer: `get_tar_cache_path` (default path, `TAR_CACHE_DIR` env var, read-only fallback), `load_or_build_tar_index` (cache hit, cache invalidation by mtime), and `filter_index_for_tileset` (no base_path, base_path prefix stripping, multi-prefix isolation).
 
 ### Test data
 
@@ -448,7 +479,7 @@ If you add a key, write it in the lifespan (for startup), in `rescan_tileset` (f
 
 **`TILE_SCAN=0` is always set for workers.** MAIN sets this before starting Uvicorn so workers never scan directories themselves. If you're running Uvicorn directly (not via `python -m app`), workers default to scanning if `TILE_SCAN` isn't set. Either set it yourself or pass `do_scan=False` to `create_app()`.
 
-**`base_path` stripping.** If a tar has tiles at `tiles/10/512/341.png` and `base_path="tiles"`, `build_tar_index` strips the prefix so the index key is `"10/512/341.png"`. If you ever change the stripping logic, change it in `build_tar_index` and verify `find_tile_in_tar_index` still matches.
+**`base_path` stripping.** If a tar has tiles at `tiles/10/512/341.png` and `base_path="tiles"`, `filter_index_for_tileset` strips the prefix so the index key is `"10/512/341.png"`. If you ever change the stripping logic, change it in `filter_index_for_tileset` and verify `find_tile_in_tar_index` still matches.
 
 **`parse_tile_member_path` takes the last three components.** Given `"a/b/c/10/512/341.png"` it returns `("10", "512", "341.png")`. This means any path ending in `z/x/y.ext` where `z` and `x` are digits is treated as a tile. If your tar contains non-tile files with this structure, they'll be indexed as tiles. In practice this doesn't matter because tiles are the only image files in a tile archive.
 

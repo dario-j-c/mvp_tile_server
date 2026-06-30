@@ -302,10 +302,6 @@ def test_admin_rescan_tar_reads_from_index(client):
 
 def test_admin_rescan_updates_metadata(client):
     """Test that rescan actually refreshes the metadata stored in app state."""
-    # Capture state before rescan
-    before = client.get("/tilesets/test_directory").json()
-
-    # Perform rescan
     rescan_resp = client.post("/admin/rescan/test_directory")
     assert rescan_resp.status_code == 200
     rescan_data = rescan_resp.json()

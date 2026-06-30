@@ -15,16 +15,18 @@ uv run python -m app [config] [options]
 | `-p`, `--port` | `8000` | Port to bind to |
 | `-b`, `--bind` | `0.0.0.0` | Address to bind to |
 | `--workers` | `4` | Number of Uvicorn worker processes |
-| `--no-scan` | off | Skip directory tile scanning at startup (faster boot, default zoom bounds used) |
+| `--no-scan` | off | Skip directory scanning and tar index pre-building at startup (faster boot, default zoom bounds used) |
 | `--event-mode` | off | Suppress access logs, minimise output; intended for live event operation |
 | `--reload` | off | Auto-reload on code changes; development only, do not use at events |
 
 ### What happens at startup
 
 1. **Config validation** — all paths are resolved and checked; any errors are printed and the process exits.
-2. **Directory pre-scan** (MAIN process, skipped with `--no-scan`) — directory tilesets are scanned once to determine tile count and zoom bounds. Results are written to a temp file for workers to read. Tar tilesets are not scanned here.
+2. **Pre-scan / pre-build** (MAIN process, skipped with `--no-scan`) — two things happen here:
+   - **Directory tilesets** are scanned once to determine tile count and zoom bounds. Results are written to a temp JSON file for workers to read.
+   - **Tar tilesets** have their member indexes built and saved as `.idx` cache files alongside each tar (or in `TAR_CACHE_DIR` if set). Workers load the cache instead of re-parsing the archive.
 3. **Workers start** — each worker:
-   - Builds an in-memory index of every tar tileset (reads all member headers; no tile data is read). Each entry records only the four values needed for serving: byte offset, size, mtime, and file extension (`TileEntry`). The file is then memory-mapped (one `mmap` per tileset) so tile reads are direct in-memory slices — no per-request file open.
+   - Loads the tar index from the `.idx` cache written by MAIN (fast — just a pickle deserialise). If the cache is missing or older than the tar file, the worker parses the archive headers directly and saves a fresh cache. Each entry records the four values needed for serving: byte offset, size, mtime, and extension (`TileEntry`). The file is then memory-mapped (one `mmap` per tileset) so tile reads are direct in-memory slices — no per-request file open.
    - Metadata for tar tilesets (tile count, zoom levels, sample tiles) is derived from the index — no extra scan.
    - Directory metadata is read from the pre-scan temp file (or defaults if `--no-scan` was used).
 4. **Server ready** — requests are accepted.
@@ -345,3 +347,14 @@ python inspect_tar.py /path/to/tiles.tar --timeout 120 --max-members 5000
 ```
 
 It reports compression type, detected zoom levels, file extensions, and generates the config snippet to paste directly into your config file.
+
+---
+
+## Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `CONFIG_PATH` | `config.json` | Path to the tileset config. Set automatically by MAIN; override when running Uvicorn directly. |
+| `TILE_SCAN` | `1` | Set to `0` by MAIN so workers never re-scan. Set manually when running Uvicorn directly without `python -m app`. |
+| `TILE_METADATA_FILE` | _(unset)_ | Path to the pre-scan JSON written by MAIN. Workers read it to get directory tileset metadata without rescanning. |
+| `TAR_CACHE_DIR` | _(unset)_ | Directory where `.idx` cache files are written. Defaults to alongside the tar file (e.g. `tiles.tar.idx`), falling back to the OS temp directory if the tar's parent is not writable. |

@@ -5,7 +5,10 @@ import datetime
 import email.utils
 import logging
 import mmap
+import os
+import pickle
 import tarfile
+import tempfile
 from pathlib import Path
 from typing import IO, Any, Dict, List, Optional, Set, Tuple
 
@@ -26,22 +29,53 @@ logger = logging.getLogger("event_tile_server")
 _MAX_SAMPLE_TILES = 5
 
 
-def build_tar_index(
-    tar_path: Path, base_path: str = ""
+def get_tar_cache_path(tar_path: Path) -> Path:
+    """Determine where to save the .idx cache file."""
+    cache_dir = os.environ.get("TAR_CACHE_DIR")
+    if cache_dir:
+        return Path(cache_dir) / f"{tar_path.name}.idx"
+
+    default_path = tar_path.with_suffix(tar_path.suffix + ".idx")
+    try:
+        if os.access(tar_path.parent, os.W_OK):
+            return default_path
+    except Exception:
+        pass
+
+    return Path(tempfile.gettempdir()) / f"{tar_path.name}.idx"
+
+
+def build_unified_tar_index(tar_path: Path) -> Dict[str, TileEntry]:
+    """Build a unified index of all tile members in a tar archive."""
+    unified_index: Dict[str, TileEntry] = {}
+    try:
+        # "r:*" accepts any compression, but compressed tars are rejected at
+        # config-load time, so only uncompressed archives reach this point.
+        with tarfile.open(tar_path, "r:*") as tar:
+            for member in tar:
+                if not member.isfile():
+                    continue
+                unified_index[member.name] = TileEntry(
+                    offset=member.offset_data,
+                    size=member.size,
+                    mtime=member.mtime,
+                    suffix=Path(member.name).suffix.lower(),
+                )
+        logger.debug(
+            "Built unified tar index for %s: %d total files",
+            tar_path.name,
+            len(unified_index),
+        )
+    except Exception as e:
+        logger.error("Error building unified tar index for %s: %s", tar_path, e)
+        raise ValueError(f"Failed to build unified tar index: {e}")
+    return unified_index
+
+
+def filter_index_for_tileset(
+    unified_index: Dict[str, TileEntry], base_path: str = ""
 ) -> Tuple[Dict[str, TileEntry], Set[int], List[str]]:
-    """
-    Build an index of tile members in a tar archive for fast lookup.
-
-    Args:
-        tar_path: Path to tar archive.
-        base_path: Optional path prefix inside the archive (e.g. "tiles").
-
-    Returns:
-        Tuple of (member_index, zoom_levels, sample_tiles).
-        member_index maps "z/x/y.ext" -> TileEntry (offset, size, mtime, suffix).
-        zoom_levels is the set of integer zoom levels found.
-        sample_tiles is up to _MAX_SAMPLE_TILES representative paths.
-    """
+    """Extract tileset-specific structures from the unified index."""
     member_index: Dict[str, TileEntry] = {}
     zoom_levels: Set[int] = set()
     sample_tiles: List[str] = []
@@ -49,42 +83,74 @@ def build_tar_index(
     if base_path:
         base_path = base_path.strip("/") + "/"
 
-    try:
-        with tarfile.open(tar_path, "r:*") as tar:
-            for member in tar:
-                if not member.isfile():
-                    continue
+    for member_path, entry in unified_index.items():
+        if base_path and not member_path.startswith(base_path):
+            continue
 
-                member_path = member.name
-                if base_path and member_path.startswith(base_path):
-                    member_path = member_path[len(base_path) :]
-
-                parsed = parse_tile_member_path(member_path)
-                if parsed:
-                    z_str, x_str, y_name = parsed
-                    zoom_levels.add(int(z_str))
-                    tile_key = f"{z_str}/{x_str}/{y_name}"
-                    member_index[tile_key] = TileEntry(
-                        offset=member.offset_data,
-                        size=member.size,
-                        mtime=member.mtime,
-                        suffix=Path(member.name).suffix.lower(),
-                    )
-                    if len(sample_tiles) < _MAX_SAMPLE_TILES:
-                        sample_tiles.append(tile_key)
-
-        logger.debug(
-            "Built tar index for %s: %d tiles, zoom levels %s",
-            tar_path.name,
-            len(member_index),
-            sorted(zoom_levels) if zoom_levels else "none",
-        )
-
-    except Exception as e:
-        logger.error("Error building tar index for %s: %s", tar_path, e)
-        raise ValueError(f"Failed to build tar index: {e}")
+        rel_path = member_path[len(base_path) :] if base_path else member_path
+        parsed = parse_tile_member_path(rel_path)
+        if parsed:
+            z_str, x_str, y_name = parsed
+            zoom_levels.add(int(z_str))
+            tile_key = f"{z_str}/{x_str}/{y_name}"
+            member_index[tile_key] = entry
+            if len(sample_tiles) < _MAX_SAMPLE_TILES:
+                sample_tiles.append(tile_key)
 
     return member_index, zoom_levels, sample_tiles
+
+
+def load_or_build_tar_index(
+    tar_path: Path, force_rebuild: bool = False
+) -> Dict[str, TileEntry]:
+    """Load the unified index from cache if valid, otherwise build and cache it."""
+    cache_path = get_tar_cache_path(tar_path)
+
+    if not force_rebuild and cache_path.exists():
+        try:
+            tar_mtime = tar_path.stat().st_mtime
+            cache_mtime = cache_path.stat().st_mtime
+            if cache_mtime >= tar_mtime:
+                logger.debug(
+                    "Loading tar index cache for %s from %s", tar_path.name, cache_path
+                )
+                with open(cache_path, "rb") as f:
+                    unified_index = pickle.load(f)
+                return unified_index
+        except Exception as e:
+            logger.warning("Error checking/loading tar index cache: %s", e)
+
+    logger.info("Building unified tar index for %s...", tar_path.name)
+    unified_index = build_unified_tar_index(tar_path)
+
+    try:
+        temp_cache = cache_path.with_suffix(".tmp")
+        with open(temp_cache, "wb") as f:
+            pickle.dump(unified_index, f, protocol=pickle.HIGHEST_PROTOCOL)
+        os.replace(temp_cache, cache_path)
+        logger.debug("Saved tar index cache to %s", cache_path)
+    except Exception as e:
+        logger.warning("Failed to save tar index cache to %s: %s", cache_path, e)
+
+    return unified_index
+
+
+def build_tar_index(
+    tar_path: Path, base_path: str = "", force_rebuild: bool = False
+) -> Tuple[Dict[str, TileEntry], Set[int], List[str]]:
+    """
+    Build an index of tile members in a tar archive for fast lookup.
+
+    Args:
+        tar_path: Path to tar archive.
+        base_path: Optional path prefix inside the archive (e.g. "tiles").
+        force_rebuild: If True, bypass the cache and rebuild the index.
+
+    Returns:
+        Tuple of (member_index, zoom_levels, sample_tiles).
+    """
+    unified_index = load_or_build_tar_index(tar_path, force_rebuild=force_rebuild)
+    return filter_index_for_tileset(unified_index, base_path)
 
 
 class TarManager:
@@ -186,8 +252,10 @@ class TarManager:
                 self.index_status[tileset_name]["status"] = "rebuilding"
 
             try:
+                # force_rebuild=True: the tar changed, so bypass cache and
+                # write a fresh .idx file for subsequent workers to pick up.
                 new_index, zoom_levels, _ = await asyncio.to_thread(
-                    build_tar_index, source_path, base_path
+                    build_tar_index, source_path, base_path, True
                 )
 
                 zoom_levels_sorted = sorted(zoom_levels)
@@ -281,7 +349,9 @@ class TarManager:
             raise TileNotFoundError(tileset_name, z, x, y_name, tried_extensions)
 
         etag = f'W/"{tile_entry.mtime}-{tile_entry.size}"'
-        media_type = media_type_for_suffix(tile_entry.suffix) or "application/octet-stream"
+        media_type = (
+            media_type_for_suffix(tile_entry.suffix) or "application/octet-stream"
+        )
 
         if if_none_match and if_none_match == etag:
             return (
@@ -294,7 +364,9 @@ class TarManager:
             )
 
         try:
-            tile_data: bytes = mmap_obj[tile_entry.offset : tile_entry.offset + tile_entry.size]
+            tile_data: bytes = mmap_obj[
+                tile_entry.offset : tile_entry.offset + tile_entry.size
+            ]
         except Exception as e:
             logger.error(
                 "Error reading tile from mmap for tileset '%s': %s", tileset_name, e
