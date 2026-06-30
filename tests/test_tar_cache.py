@@ -52,7 +52,7 @@ def test_get_tar_cache_path(temp_dir, monkeypatch):
     monkeypatch.delenv("TAR_CACHE_DIR")
 
     # Test read-only fallback
-    monkeypatch.setattr(os, "access", lambda path, mode: False)
+    monkeypatch.setattr(os, "access", lambda path, _mode: False)
     fallback = get_tar_cache_path(tar_path)
     assert fallback == Path(tempfile.gettempdir()) / "test.tar.idx"
 
